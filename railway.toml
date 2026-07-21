@@ -1,0 +1,10 @@
+[build]
+builder = "RAILPACK"
+
+[deploy]
+preDeployCommand = ["sh _build/prod/rel/mafia/bin/migrate"]
+startCommand = "sh _build/prod/rel/mafia/bin/server"
+healthcheckPath = "/health"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

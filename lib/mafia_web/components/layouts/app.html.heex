@@ -1,0 +1,32 @@
+<header class="border-b border-[color:var(--border)] bg-[color:var(--glass-bg)] backdrop-blur-xl">
+  <nav
+    class="mx-auto flex min-h-14 max-w-6xl items-center justify-between gap-4 px-4"
+    aria-label="Primary"
+  >
+    <.link navigate={~p"/"} class="text-lg font-semibold tracking-wide text-[color:var(--text)]">
+      Mafia
+    </.link>
+
+    <div class="flex items-center gap-4 text-sm">
+      <.link navigate={~p"/"}>Games</.link>
+      <%= if assigns[:current_user] do %>
+        <.link navigate={~p"/messages"}>Chat</.link>
+        <.link navigate={~p"/notifications"}>Notifications</.link>
+        <.link navigate={~p"/profile"}>{@current_user.username}</.link>
+        <.link href={~p"/users/log-out"} method="delete">Sign out</.link>
+      <% else %>
+        <.link navigate={~p"/users/log-in"}>Sign in</.link>
+      <% end %>
+    </div>
+  </nav>
+</header>
+<main class="mx-auto min-h-[calc(100vh-3.5rem)] max-w-6xl px-4 py-8">
+  <div
+    :if={!Mafia.WriteGate.enabled?()}
+    class="mb-6 rounded-lg border border-[color:var(--warning-text)] px-4 py-3 text-sm text-[color:var(--warning-text)]"
+  >
+    Read-only while the one-time data move is being verified.
+  </div>
+  <.flash_group flash={@flash} />
+  {if assigns[:inner_content], do: @inner_content, else: render_slot(@inner_block)}
+</main>
