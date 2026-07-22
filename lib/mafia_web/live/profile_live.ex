@@ -54,7 +54,7 @@ defmodule MafiaWeb.ProfileLive do
     <section class="mx-auto max-w-2xl panel">
       <.header>
         Your profile
-        <:subtitle>This lightweight profile belongs to the Mafia community.</:subtitle>
+        <:subtitle>This lightweight profile belongs to the Nightjury community.</:subtitle>
       </.header>
 
       <div class="mb-6 flex items-center gap-4">

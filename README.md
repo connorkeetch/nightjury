@@ -1,6 +1,6 @@
-# Mafia
+# Nightjury
 
-Standalone Phoenix LiveView Mafia game, extracted from
+Nightjury is a standalone Phoenix LiveView Mafia game, extracted from
 [ConquestK](https://github.com/connorkeetch/conquestk). It owns its PostgreSQL
 database, authentication, profiles, chat, notifications, and background jobs.
 
