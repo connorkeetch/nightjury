@@ -16,6 +16,10 @@
         <.icon name="hero-rectangle-stack" class="size-5" />
         <span class="nav-link-label">Games</span>
       </.link>
+      <.link navigate={~p"/forums"} class="nav-link" aria-label="Forums" title="Forums">
+        <.icon name="hero-chat-bubble-oval-left-ellipsis" class="size-5" />
+        <span class="nav-link-label">Forums</span>
+      </.link>
       <%= if assigns[:current_user] do %>
         <.link navigate={~p"/messages"} class="nav-link" aria-label="Chat" title="Chat">
           <.icon name="hero-chat-bubble-left-right" class="size-5" />

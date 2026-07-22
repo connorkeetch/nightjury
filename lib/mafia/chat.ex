@@ -1,7 +1,7 @@
 defmodule Mafia.Chat do
-  @moduledoc "Mafia-scoped group chat, membership, and reactions."
+  @moduledoc "Private game chat and public forum conversations."
 
-  alias Mafia.Accounts
+  alias Mafia.{Accounts, GameRules, Games}
   alias Mafia.Chat.Resources.{Conversation, ConversationMember, Message, MessageReaction}
   alias Mafia.Repo
 
@@ -12,8 +12,114 @@ defmodule Mafia.Chat do
   @send_rate_limit 10
   @reaction_rate_window :timer.seconds(10)
   @reaction_rate_limit 30
+  @forum_topic_rate_window :timer.minutes(10)
+  @forum_topic_rate_limit 5
+  @forum_title_max_length 160
 
   def allowed_reactions, do: @allowed_reactions
+
+  def create_forum_topic(creator_id, attrs) when is_map(attrs) do
+    title = attrs |> value(:title) |> to_string() |> String.trim()
+    body = attrs |> value(:body) |> to_string() |> String.trim()
+
+    with :ok <- Mafia.WriteGate.ensure_enabled(),
+         %{} <- Accounts.get_user(creator_id),
+         :ok <- validate_topic_title(title),
+         :ok <- validate_body(body),
+         :ok <- rate_limit_forum_topic(creator_id) do
+      result =
+        Repo.transaction(fn ->
+          with {:ok, conversation} <-
+                 Conversation
+                 |> Ash.Changeset.for_create(:create, %{
+                   kind: :forum,
+                   creator_id: creator_id,
+                   title: title
+                 })
+                 |> Ash.create(authorize?: false),
+               :ok <- add_members(conversation.id, creator_id, []),
+               {:ok, _message} <- create_message(conversation.id, creator_id, body) do
+            conversation
+          else
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        end)
+        |> transaction_result()
+
+      case result do
+        {:ok, conversation} -> broadcast_and_return(conversation.id, result)
+        error -> error
+      end
+    else
+      nil -> {:error, :creator_not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def create_forum_topic(_creator_id, _attrs), do: {:error, :invalid_topic}
+
+  def list_forum_topics do
+    Conversation
+    |> Ash.Query.filter(kind == :forum and is_archived == false)
+    |> Ash.Query.load(:creator)
+    |> Ash.read!(authorize?: false)
+    |> Enum.sort_by(& &1.created_at, {:desc, DateTime})
+  end
+
+  def get_forum_topic(conversation_id) do
+    case Ash.get(Conversation, conversation_id, authorize?: false) do
+      {:ok, %Conversation{kind: :forum, is_archived: false} = conversation} ->
+        Ash.load(conversation, :creator, authorize?: false)
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  def list_forum_messages(conversation_id) do
+    with {:ok, _conversation} <- get_forum_topic(conversation_id) do
+      read_messages(conversation_id)
+    end
+  end
+
+  def join_forum_topic(conversation_id, user_id) do
+    with :ok <- Mafia.WriteGate.ensure_enabled(),
+         %{} <- Accounts.get_user(user_id),
+         {:ok, _conversation} <- get_forum_topic(conversation_id) do
+      case membership(conversation_id, user_id) do
+        {:ok, member} ->
+          {:ok, member}
+
+        {:error, :not_a_member} ->
+          ConversationMember
+          |> Ash.Changeset.for_create(:create, %{
+            conversation_id: conversation_id,
+            user_id: user_id,
+            role: :member
+          })
+          |> Ash.create(authorize?: false)
+      end
+    else
+      nil -> {:error, :user_not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def reply_to_forum_topic(conversation_id, user_id, body) do
+    with {:ok, _member} <- join_forum_topic(conversation_id, user_id) do
+      send_message(conversation_id, user_id, body)
+    end
+  end
+
+  def toggle_forum_reaction(message_id, user_id, emoji) when emoji in @allowed_reactions do
+    with {:ok, message} <- forum_message(message_id),
+         {:ok, _member} <- join_forum_topic(message.conversation_id, user_id) do
+      toggle_reaction(message_id, user_id, emoji)
+    end
+  end
+
+  def toggle_forum_reaction(_message_id, _user_id, _emoji),
+    do: {:error, :unsupported_reaction}
 
   def create_group_conversation(creator_id, member_ids, opts \\ []) do
     with :ok <- Mafia.WriteGate.ensure_enabled(),
@@ -22,13 +128,21 @@ defmodule Mafia.Chat do
         with {:ok, conversation} <-
                Conversation
                |> Ash.Changeset.for_create(:create, %{
-                 kind: :group,
+                 kind: Keyword.get(opts, :kind, :group),
                  creator_id: creator_id,
                  title: Keyword.get(opts, :title),
+                 game_id: Keyword.get(opts, :game_id),
                  metadata: Keyword.get(opts, :metadata, %{})
                })
                |> Ash.create(authorize?: false),
-             :ok <- add_members(conversation.id, creator_id, member_ids) do
+             :ok <-
+               add_members(
+                 conversation.id,
+                 creator_id,
+                 member_ids,
+                 Keyword.get(opts, :admin_ids, []),
+                 Keyword.get(opts, :include_creator?, true)
+               ) do
           conversation
         else
           {:error, reason} -> Repo.rollback(reason)
@@ -47,12 +161,58 @@ defmodule Mafia.Chat do
     |> Ash.read!(authorize?: false)
     |> Enum.map(& &1.conversation)
     |> Enum.reject(&(&1.is_archived or not mafia_conversation?(&1)))
+    |> Enum.filter(&conversation_readable?(&1, user_id))
     |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
+  end
+
+  @doc "Active conversations attached to a game, including faction and side chats."
+  def list_game_conversations(game_id) do
+    Conversation
+    |> Ash.Query.filter(game_id == ^game_id and is_archived == false)
+    |> Ash.Query.sort(created_at: :asc)
+    |> Ash.read!(authorize?: false)
+  end
+
+  @doc "Reconciles members while preserving the moderator performing the sync."
+  def sync_conversation_members(conversation_id, actor_id, member_ids, opts \\ []) do
+    member_ids = member_ids |> List.wrap() |> Enum.map(&to_string/1) |> MapSet.new()
+    preserve_actor? = Keyword.get(opts, :preserve_actor?, true)
+
+    with :ok <- Mafia.WriteGate.ensure_enabled(),
+         {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
+         :ok <- authorize_membership_sync(conversation, actor_id) do
+      result =
+        Repo.transaction(fn ->
+          current =
+            ConversationMember
+            |> Ash.Query.filter(conversation_id == ^conversation_id)
+            |> Ash.read!(authorize?: false)
+
+          current_ids = MapSet.new(current, & &1.user_id)
+
+          with :ok <- add_missing_members(conversation_id, member_ids, current_ids),
+               :ok <- remove_extra_members(current, member_ids, actor_id, preserve_actor?) do
+            :ok
+          else
+            {:error, reason} -> Repo.rollback(reason)
+          end
+        end)
+
+      case result do
+        {:ok, :ok} ->
+          broadcast(conversation_id)
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
   end
 
   def get_conversation_for_user(conversation_id, user_id) do
     with {:ok, _member} <- membership(conversation_id, user_id),
          {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
+         :ok <- verify_can_read(conversation, user_id),
          {:ok, loaded} <- Ash.load(conversation, [members: [:user]], authorize?: false) do
       {:ok, loaded}
     else
@@ -61,12 +221,10 @@ defmodule Mafia.Chat do
   end
 
   def list_messages(conversation_id, user_id) do
-    with {:ok, _member} <- membership(conversation_id, user_id) do
-      Message
-      |> Ash.Query.filter(conversation_id == ^conversation_id and is_nil(deleted_at))
-      |> Ash.Query.sort(created_at: :asc)
-      |> Ash.Query.load([:user, reactions: [:user]])
-      |> Ash.read(authorize?: false)
+    with {:ok, _member} <- membership(conversation_id, user_id),
+         {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
+         :ok <- verify_can_read(conversation, user_id) do
+      read_messages(conversation_id)
     end
   end
 
@@ -78,16 +236,14 @@ defmodule Mafia.Chat do
          {:ok, member} <- membership(conversation_id, user_id),
          :ok <- maybe_rate_limit_send(system?, conversation_id, user_id),
          {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
-         :ok <- verify_can_send(member, conversation, body, system?),
+         :ok <- verify_can_send(member, conversation, body, system?, user_id),
          {:ok, message} <-
-           Message
-           |> Ash.Changeset.for_create(:create, %{
-             conversation_id: conversation_id,
-             user_id: user_id,
-             body: body,
-             json_metadata: if(system?, do: %{"system" => true}, else: %{})
-           })
-           |> Ash.create(authorize?: false) do
+           create_message(
+             conversation_id,
+             user_id,
+             body,
+             if(system?, do: %{"system" => true}, else: %{})
+           ) do
       broadcast(conversation_id)
       {:ok, message}
     end
@@ -121,8 +277,8 @@ defmodule Mafia.Chat do
 
   def archive_conversation(conversation_id, actor_id) do
     with :ok <- Mafia.WriteGate.ensure_enabled(),
-         {:ok, _admin} <- admin_membership(conversation_id, actor_id),
          {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
+         :ok <- authorize_membership_sync(conversation, actor_id),
          {:ok, updated} <-
            conversation
            |> Ash.Changeset.for_update(:update, %{is_archived: true})
@@ -136,7 +292,9 @@ defmodule Mafia.Chat do
     with :ok <- Mafia.WriteGate.ensure_enabled(),
          {:ok, message} <- Ash.get(Message, message_id, authorize?: false),
          {:ok, member} <- membership(message.conversation_id, user_id),
-         :ok <- verify_can_react(member),
+         {:ok, conversation} <-
+           Ash.get(Conversation, message.conversation_id, authorize?: false),
+         :ok <- verify_can_react(member, conversation, user_id),
          :ok <- rate_limit_reaction(message.conversation_id, user_id) do
       case find_reaction(message_id, user_id, emoji) do
         {:ok, %MessageReaction{} = reaction} ->
@@ -173,14 +331,25 @@ defmodule Mafia.Chat do
     Phoenix.PubSub.subscribe(Mafia.PubSub, "conversation:#{conversation_id}")
   end
 
-  defp add_members(conversation_id, creator_id, member_ids) do
-    [creator_id | member_ids]
+  @doc "Publishes a refresh after a caller-owned database transaction commits."
+  def refresh_conversation(conversation_id) do
+    broadcast(conversation_id)
+    :ok
+  end
+
+  defp add_members(conversation_id, creator_id, member_ids),
+    do: add_members(conversation_id, creator_id, member_ids, [], true)
+
+  defp add_members(conversation_id, creator_id, member_ids, admin_ids, include_creator?) do
+    admin_ids = MapSet.new([creator_id | admin_ids])
+
+    if(include_creator?, do: [creator_id | member_ids], else: member_ids)
     |> Enum.uniq()
     |> Enum.reduce_while(:ok, fn user_id, :ok ->
       attrs = %{
         conversation_id: conversation_id,
         user_id: user_id,
-        role: if(user_id == creator_id, do: :admin, else: :member)
+        role: if(MapSet.member?(admin_ids, user_id), do: :admin, else: :member)
       }
 
       case ConversationMember
@@ -190,6 +359,67 @@ defmodule Mafia.Chat do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  defp add_missing_members(conversation_id, desired_ids, current_ids) do
+    desired_ids
+    |> MapSet.difference(current_ids)
+    |> Enum.reduce_while(:ok, fn user_id, :ok ->
+      result =
+        ConversationMember
+        |> Ash.Changeset.for_create(:create, %{
+          conversation_id: conversation_id,
+          user_id: user_id,
+          role: :member
+        })
+        |> Ash.create(authorize?: false)
+
+      case result do
+        {:ok, _member} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp remove_extra_members(current, desired_ids, actor_id, preserve_actor?) do
+    current
+    |> Enum.reject(fn member ->
+      (preserve_actor? and member.user_id == actor_id) or
+        MapSet.member?(desired_ids, member.user_id)
+    end)
+    |> Enum.reduce_while(:ok, fn member, :ok ->
+      case Ash.destroy(member, authorize?: false) do
+        :ok -> {:cont, :ok}
+        {:ok, _member} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp authorize_membership_sync(
+         %Conversation{id: conversation_id, game_id: game_id, metadata: metadata},
+         actor_id
+       )
+       when not is_nil(game_id) do
+    case Games.get_game(game_id) do
+      {:ok, %{host_id: ^actor_id}} ->
+        :ok
+
+      _ ->
+        if Map.get(metadata || %{}, "moderator_id") == actor_id,
+          do: :ok,
+          else: membership_admin_result(conversation_id, actor_id)
+    end
+  end
+
+  defp authorize_membership_sync(%Conversation{id: conversation_id}, actor_id),
+    do: membership_admin_result(conversation_id, actor_id)
+
+  defp membership_admin_result(conversation_id, actor_id) do
+    case admin_membership(conversation_id, actor_id) do
+      {:ok, _admin} -> :ok
+      {:error, _reason} -> {:error, :not_admin}
+    end
   end
 
   defp membership(conversation_id, user_id) do
@@ -219,23 +449,72 @@ defmodule Mafia.Chat do
     end
   end
 
-  defp verify_can_send(%{role: :spectator}, _conversation, _body, _system?),
+  defp forum_message(message_id) do
+    case Ash.get(Message, message_id, authorize?: false) do
+      {:ok, %Message{} = message} ->
+        case get_forum_topic(message.conversation_id) do
+          {:ok, _conversation} -> {:ok, message}
+          _ -> {:error, :not_found}
+        end
+
+      _ ->
+        {:error, :not_found}
+    end
+  end
+
+  defp read_messages(conversation_id) do
+    Message
+    |> Ash.Query.filter(conversation_id == ^conversation_id and is_nil(deleted_at))
+    |> Ash.Query.sort(created_at: :asc)
+    |> Ash.Query.load([:user, reactions: [:user]])
+    |> Ash.read(authorize?: false)
+  end
+
+  defp create_message(conversation_id, user_id, body, metadata \\ %{}) do
+    Message
+    |> Ash.Changeset.for_create(:create, %{
+      conversation_id: conversation_id,
+      user_id: user_id,
+      body: body,
+      json_metadata: metadata
+    })
+    |> Ash.create(authorize?: false)
+  end
+
+  defp verify_can_send(_member, %{is_archived: true}, _body, _system?, _user_id),
+    do: {:error, :archived}
+
+  defp verify_can_send(%{role: :spectator}, _conversation, _body, _system?, _user_id),
     do: {:error, :read_only}
 
-  defp verify_can_send(%{shadow_muted: true}, _conversation, _body, _system?),
+  defp verify_can_send(%{shadow_muted: true}, _conversation, _body, _system?, _user_id),
     do: {:error, :muted}
 
-  defp verify_can_send(%{role: :admin}, _conversation, body, true),
+  defp verify_can_send(%{role: :admin}, _conversation, body, true, _user_id),
     do: validate_body(body)
 
-  defp verify_can_send(_member, %{is_read_only: true}, _body, _system?),
+  defp verify_can_send(_member, %{is_read_only: true}, _body, _system?, _user_id),
     do: {:error, :read_only}
 
-  defp verify_can_send(_member, _conversation, body, _system?), do: validate_body(body)
+  defp verify_can_send(_member, conversation, body, _system?, user_id) do
+    with :ok <- verify_game_capability(conversation, user_id, "post_public") do
+      validate_body(body)
+    end
+  end
 
   defp validate_body(""), do: {:error, :empty_message}
   defp validate_body(body) when byte_size(body) > 10_000, do: {:error, :message_too_long}
   defp validate_body(_), do: :ok
+
+  defp validate_topic_title(""), do: {:error, :empty_title}
+
+  defp validate_topic_title(title) do
+    if String.length(title) > @forum_title_max_length,
+      do: {:error, :title_too_long},
+      else: :ok
+  end
+
+  defp value(attrs, key), do: Map.get(attrs, key) || Map.get(attrs, Atom.to_string(key)) || ""
 
   defp maybe_rate_limit_send(true, _conversation_id, _user_id), do: :ok
 
@@ -252,6 +531,14 @@ defmodule Mafia.Chat do
       "chat:reaction:#{user_id}:#{conversation_id}",
       @reaction_rate_window,
       @reaction_rate_limit
+    )
+  end
+
+  defp rate_limit_forum_topic(user_id) do
+    rate_limit(
+      "chat:forum-topic:#{user_id}",
+      @forum_topic_rate_window,
+      @forum_topic_rate_limit
     )
   end
 
@@ -272,9 +559,87 @@ defmodule Mafia.Chat do
     |> Keyword.get(:enabled, true)
   end
 
-  defp verify_can_react(%{role: :spectator}), do: {:error, :read_only}
-  defp verify_can_react(%{shadow_muted: true}), do: {:error, :muted}
-  defp verify_can_react(_), do: :ok
+  defp verify_can_react(_member, %{is_archived: true}, _user_id),
+    do: {:error, :archived}
+
+  defp verify_can_react(%{role: :spectator}, _conversation, _user_id),
+    do: {:error, :read_only}
+
+  defp verify_can_react(member, conversation, user_id) do
+    if is_nil(conversation.game_id) and member.shadow_muted do
+      {:error, :muted}
+    else
+      verify_game_capability(conversation, user_id, "react")
+    end
+  end
+
+  defp verify_can_read(%Conversation{is_archived: true}, _user_id), do: {:error, :archived}
+
+  defp verify_can_read(conversation, user_id) do
+    if private_game_channel?(conversation) do
+      verify_game_capability(conversation, user_id, "private_chat")
+    else
+      :ok
+    end
+  end
+
+  defp conversation_readable?(conversation, user_id),
+    do: verify_can_read(conversation, user_id) == :ok
+
+  defp verify_game_capability(%Conversation{game_id: nil}, _user_id, _capability), do: :ok
+
+  defp verify_game_capability(%Conversation{} = conversation, user_id, capability) do
+    with {:ok, game} <- Games.get_game(conversation.game_id) do
+      cond do
+        game.host_id == user_id ->
+          :ok
+
+        private_game_channel?(conversation) and
+            not private_game_channel_open?(conversation, game) ->
+          {:error, :read_only}
+
+        true ->
+          case Games.fetch_player(game.id, user_id) do
+            {:ok, player} ->
+              required =
+                cond do
+                  private_game_channel?(conversation) and capability == "post_public" ->
+                    ["private_chat"]
+
+                  private_game_channel?(conversation) ->
+                    ["private_chat", capability]
+
+                  true ->
+                    [capability]
+                end
+
+              if Enum.all?(required, &GameRules.capability?(game.ruleset, player, &1)),
+                do: :ok,
+                else: {:error, :capability_not_allowed}
+
+            _ ->
+              {:error, :read_only}
+          end
+      end
+    else
+      _ -> {:error, :read_only}
+    end
+  end
+
+  defp private_game_channel?(%Conversation{metadata: metadata}) do
+    Map.get(metadata || %{}, "channel") in ["faction", "side_chat"]
+  end
+
+  defp private_game_channel_open?(conversation, game) do
+    metadata = conversation.metadata || %{}
+
+    phase_matches? =
+      Map.get(metadata, "channel") != "side_chat" or
+        Map.get(metadata, "phase_number") == game.phase_number
+
+    game.status in [:day, :night] and phase_matches? and
+      GameRules.private_chat_allowed?(game.ruleset, game.status)
+  end
 
   defp mafia_conversation?(%{metadata: metadata}) do
     is_map(metadata) and is_binary(Map.get(metadata, "mafia_game_id"))

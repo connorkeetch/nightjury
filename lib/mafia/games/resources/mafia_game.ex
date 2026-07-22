@@ -46,7 +46,7 @@ defmodule Mafia.Games.Resources.MafiaGame do
     end
 
     # The reused chat conversations. The day thread is the public discussion
-    # surface; the mafia chat is the faction's 24/7 private channel.
+    # surface; mafia_chat_conversation_id preserves the classic faction-room shortcut.
     attribute(:day_thread_conversation_id, :uuid, allow_nil?: true)
     attribute(:mafia_chat_conversation_id, :uuid, allow_nil?: true)
 
@@ -55,14 +55,20 @@ defmodule Mafia.Games.Resources.MafiaGame do
       default(%{})
 
       description(
-        "All per-game customization (phase lengths, vote type, channels, lobby_type, ...)"
+        "Reusable game configuration: phases, ballots, statuses, capabilities, chats, and rules"
       )
     end
 
-    attribute :winner_faction, :atom do
+    attribute :rules_revision, :integer do
+      allow_nil?(false)
+      default(1)
+      constraints(min: 1)
+    end
+
+    attribute :winner_faction, :string do
       allow_nil?(true)
-      constraints(one_of: [:town, :mafia])
-      description("Set when status becomes :finished (vanilla two-faction outcome)")
+      constraints(max_length: 100)
+      description("Winning faction label; free-form when the moderator declares the result")
     end
 
     create_timestamp(:created_at)
@@ -84,6 +90,14 @@ defmodule Mafia.Games.Resources.MafiaGame do
     end
 
     has_many :night_actions, Mafia.Games.Resources.MafiaNightAction do
+      destination_attribute(:mafia_game_id)
+    end
+
+    has_many :rule_revisions, Mafia.Games.Resources.MafiaRuleRevision do
+      destination_attribute(:mafia_game_id)
+    end
+
+    has_many :notebooks, Mafia.Games.Resources.MafiaNotebook do
       destination_attribute(:mafia_game_id)
     end
   end
@@ -128,6 +142,7 @@ defmodule Mafia.Games.Resources.MafiaGame do
         :day_thread_conversation_id,
         :mafia_chat_conversation_id,
         :ruleset,
+        :rules_revision,
         :winner_faction
       ])
     end

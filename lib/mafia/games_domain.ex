@@ -14,5 +14,7 @@ defmodule Mafia.GamesDomain do
     resource(Mafia.Games.Resources.MafiaPlayer)
     resource(Mafia.Games.Resources.MafiaVote)
     resource(Mafia.Games.Resources.MafiaNightAction)
+    resource(Mafia.Games.Resources.MafiaRuleRevision)
+    resource(Mafia.Games.Resources.MafiaNotebook)
   end
 end

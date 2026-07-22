@@ -32,6 +32,8 @@ $copiedTables = @(
     "mafia_players",
     "mafia_votes",
     "mafia_night_actions",
+    "mafia_rule_revisions",
+    "mafia_notebooks",
     "notifications"
 )
 
@@ -167,6 +169,8 @@ SELECT
   (SELECT count(*) FROM mafia_players) +
   (SELECT count(*) FROM mafia_votes) +
   (SELECT count(*) FROM mafia_night_actions) +
+  (SELECT count(*) FROM mafia_rule_revisions) +
+  (SELECT count(*) FROM mafia_notebooks) +
   (SELECT count(*) FROM notifications) +
   (SELECT count(*) FROM oban_jobs);
 "@

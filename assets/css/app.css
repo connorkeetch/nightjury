@@ -677,6 +677,12 @@ textarea.input {
   }
 }
 
+@media (max-width: 22rem) {
+  .brand {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   html {
     scroll-behavior: auto;

@@ -39,6 +39,9 @@ defmodule MafiaWeb.Router do
       live "/", MafiaLive, :index
       live "/mafia", MafiaLive, :index
       live "/mafia/:id", MafiaRoomLive, :show
+      live "/mafia/:id/rules", GameRulesLive, :show
+      live "/forums", ForumLive, :index
+      live "/forums/:id", ForumLive, :show
       live "/users/log-in", AuthLive, :login
       live "/users/register", AuthLive, :register
       live "/users/:username", ProfileLive, :show
@@ -59,6 +62,8 @@ defmodule MafiaWeb.Router do
       ],
       layout: {MafiaWeb.Layouts, :app} do
       live "/profile", ProfileLive, :edit
+      live "/mafia/:id/settings", GameSettingsLive, :edit
+      live "/mafia/:id/notes", GameNotesLive, :edit
       live "/messages", MessagesLive, :index
       live "/messages/:conversation_id", ChatLive, :show
       live "/notifications", NotificationsLive, :index

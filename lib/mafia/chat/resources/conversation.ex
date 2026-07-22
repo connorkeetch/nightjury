@@ -16,7 +16,7 @@ defmodule Mafia.Chat.Resources.Conversation do
     attribute :kind, :atom do
       allow_nil?(false)
       default(:group)
-      constraints(one_of: [:direct, :group, :game])
+      constraints(one_of: [:direct, :group, :game, :forum])
     end
 
     attribute(:title, :string)
