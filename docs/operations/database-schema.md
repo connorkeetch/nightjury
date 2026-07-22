@@ -9,7 +9,7 @@ of truth is [`priv/repo/migrations/`](../../priv/repo/migrations/).
 | --- | --- |
 | Accounts and profiles | `users`, `user_account_status` |
 | Chat | `conversations`, `conversation_members`, `messages`, `message_reactions` |
-| Mafia | `mafia_games`, `mafia_players`, `mafia_votes`, `mafia_night_actions` |
+| Mafia | `mafia_games`, `mafia_players`, `mafia_votes`, `mafia_night_actions`, `mafia_rule_revisions`, `mafia_notebooks` |
 | Inbox | `notifications` |
 | Jobs | Oban's `oban_jobs`, `oban_peers`, and supporting objects |
 

@@ -1,10 +1,10 @@
 defmodule Mafia.Games.Resources.MafiaVote do
   @moduledoc """
-  A day-phase lynch vote. One live vote per (game, phase, voter) — the unique
-  identity makes "change your vote" an upsert and "unvote" a delete. A null
-  `target_player_id` is an explicit "No Lynch".
+  A choice on a ruleset-defined ballot. One live choice per
+  (game, phase, ballot, voter) makes "change your vote" an update and "unvote"
+  a delete. A null `target_player_id` is the ballot's configured no-result choice.
 
-  Integrity (voter alive, phase open, before deadline) is enforced in the
+  Integrity (status/capability eligibility, phase open, before deadline) is enforced in the
   `Mafia.Games` context at cast time, mirroring `Chat.send_message`'s
   `verify_can_send` approach.
   """
@@ -22,6 +22,12 @@ defmodule Mafia.Games.Resources.MafiaVote do
     uuid_primary_key(:id)
 
     attribute(:phase_number, :integer, allow_nil?: false)
+
+    attribute :ballot_key, :string do
+      allow_nil?(false)
+      default("elimination")
+      constraints(max_length: 40)
+    end
 
     create_timestamp(:created_at)
     update_timestamp(:updated_at)
@@ -50,7 +56,12 @@ defmodule Mafia.Games.Resources.MafiaVote do
   end
 
   identities do
-    identity(:one_vote_per_phase, [:mafia_game_id, :phase_number, :voter_player_id])
+    identity(:one_vote_per_ballot, [
+      :mafia_game_id,
+      :phase_number,
+      :ballot_key,
+      :voter_player_id
+    ])
   end
 
   policies do
@@ -74,7 +85,13 @@ defmodule Mafia.Games.Resources.MafiaVote do
     defaults([:read, :destroy])
 
     create :create do
-      accept([:mafia_game_id, :phase_number, :voter_player_id, :target_player_id])
+      accept([
+        :mafia_game_id,
+        :phase_number,
+        :ballot_key,
+        :voter_player_id,
+        :target_player_id
+      ])
     end
 
     update :update do

@@ -90,6 +90,10 @@ SELECT 'mafia_games', count(*) FROM mafia_games
 UNION ALL
 SELECT 'mafia_players', count(*) FROM mafia_players
 UNION ALL
+SELECT 'mafia_rule_revisions', count(*) FROM mafia_rule_revisions
+UNION ALL
+SELECT 'mafia_notebooks', count(*) FROM mafia_notebooks
+UNION ALL
 SELECT 'mafia_conversations', count(*) FROM conversations
 UNION ALL
 SELECT 'mafia_messages', count(*) FROM messages

@@ -2,7 +2,7 @@ defmodule Mafia.Workers.MafiaPhaseWorker do
   @moduledoc """
   Fires at a Mafia phase deadline.
 
-  - **Day** → auto-resolve the lynch and advance to Night (`Games.resolve_day/1`).
+  - **Day** → resolve automatically when enabled, otherwise notify the moderator.
   - **Night** → nudge the mod that night is overdue (night resolution is manual;
     there is no auto-resolver in v1).
 
@@ -15,21 +15,35 @@ defmodule Mafia.Workers.MafiaPhaseWorker do
   use Oban.Worker,
     queue: :mafia,
     max_attempts: 3,
-    unique: [period: :infinity, keys: [:mafia_game_id, :phase_number]]
+    unique: [period: :infinity, keys: [:mafia_game_id, :phase_number, :rules_revision]]
 
   alias Mafia.Games
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"mafia_game_id" => game_id, "phase_number" => phase_number}}) do
+  def perform(%Oban.Job{
+        args: %{
+          "mafia_game_id" => game_id,
+          "phase_number" => phase_number,
+          "rules_revision" => rules_revision
+        }
+      }) do
     case Games.get_game(game_id) do
-      {:ok, %{phase_number: ^phase_number, status: :day} = game} ->
-        Games.resolve_day(game)
-
-      {:ok, %{phase_number: ^phase_number, status: :night} = game} ->
-        Games.nudge_night_overdue(game)
+      {:ok, %{phase_number: ^phase_number, rules_revision: ^rules_revision} = game} ->
+        Games.handle_phase_deadline(game)
 
       _ ->
         # Stale phase, finished, or deleted — nothing to do.
+        :ok
+    end
+  end
+
+  # Jobs scheduled before rules revisions shipped remain valid for untouched games.
+  def perform(%Oban.Job{args: %{"mafia_game_id" => game_id, "phase_number" => phase_number}}) do
+    case Games.get_game(game_id) do
+      {:ok, %{phase_number: ^phase_number, rules_revision: 1} = game} ->
+        Games.handle_phase_deadline(game)
+
+      _ ->
         :ok
     end
   end

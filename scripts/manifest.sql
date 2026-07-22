@@ -62,6 +62,14 @@ manifest AS (
          md5(COALESCE(string_agg(id::text, ',' ORDER BY id), ''))
   FROM mafia_night_actions
   UNION ALL
+  SELECT 'mafia_rule_revisions', count(*),
+         md5(COALESCE(string_agg(id::text, ',' ORDER BY id), ''))
+  FROM mafia_rule_revisions
+  UNION ALL
+  SELECT 'mafia_notebooks', count(*),
+         md5(COALESCE(string_agg(id::text, ',' ORDER BY id), ''))
+  FROM mafia_notebooks
+  UNION ALL
   SELECT 'conversations', count(*),
          md5(COALESCE(string_agg(conversation.id::text, ',' ORDER BY conversation.id), ''))
   FROM conversations AS conversation

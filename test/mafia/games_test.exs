@@ -1,7 +1,7 @@
 defmodule Mafia.GamesTest do
   use Mafia.DataCase
 
-  alias Mafia.{Fixtures, Games, Notifications}
+  alias Mafia.{Chat, Fixtures, GameRules, Games, Notifications}
 
   test "starts Day 1 with dedicated Town and Mafia conversations" do
     %{game: game, host: host} = started_game([:mafia, :town, :town])
@@ -32,7 +32,7 @@ defmodule Mafia.GamesTest do
 
     finished = Games.get_game!(game.id)
     assert finished.status == :finished
-    assert finished.winner_faction == :town
+    assert finished.winner_faction == "town"
   end
 
   test "refuses to start an unbalanced roster" do
@@ -71,7 +71,7 @@ defmodule Mafia.GamesTest do
 
     finished = Games.get_game!(game.id)
     assert finished.status == :finished
-    assert finished.winner_faction == :mafia
+    assert finished.winner_faction == "mafia"
   end
 
   test "dead players cannot vote" do
@@ -191,9 +191,228 @@ defmodule Mafia.GamesTest do
     assert {:error, :writes_frozen} = Notifications.mark_all_read(user.id)
   end
 
-  defp started_game(alignments) do
+  test "host updates normalized rules with immutable revision snapshots" do
     host = Fixtures.user_fixture()
-    {:ok, game} = Games.create_game(host.id, %{title: "Test Game"})
+    {:ok, game} = Games.create_game(host.id)
+    rules = Map.put(game.ruleset, "day_length_seconds", 7_200)
+
+    assert {:ok, updated} =
+             Games.update_rules(game, host.id, game.rules_revision, rules, "Shortened the day")
+
+    assert updated.rules_revision == 2
+    assert updated.ruleset["day_length_seconds"] == 7_200
+
+    assert [revision, initial] = Games.list_rule_revisions(updated)
+    assert initial.revision == 1
+    assert revision.revision == 2
+    assert revision.summary == "Shortened the day"
+    assert revision.phase_number == 0
+    assert revision.status == "setup"
+
+    assert {:error, :stale_rules} =
+             Games.update_rules(updated, host.id, 1, rules, "Stale browser tab")
+  end
+
+  test "named ballots keep choices isolated and hide secret vote details" do
+    default = GameRules.default()
+    elimination = hd(GameRules.ballots(default))
+
+    president =
+      GameRules.new_ballot()
+      |> Map.merge(%{
+        "key" => "president",
+        "title" => "President",
+        "phase" => "day",
+        "method" => "plurality",
+        "visibility" => "secret",
+        "show_voters" => true,
+        "effect" => "moderator"
+      })
+
+    rules = Map.put(default, "ballots", [elimination, president])
+
+    %{game: game, host: host, players: [mafia, town1, town2, _town3]} =
+      started_game([:mafia, :town, :town, :town], rules)
+
+    assert {:ok, _} = Games.cast_vote(game, town1.user.id, mafia.player.id)
+
+    assert {:ok, _} =
+             Games.cast_ballot(game, town1.user.id, "president", town2.player.id)
+
+    assert Games.vote_counts(game).tallies == %{mafia.player.id => 1}
+    assert Games.ballot_totals(game, "president").tallies == %{town2.player.id => 1}
+    assert Games.ballot_choice(game, town1.user.id, "president") == town2.player.id
+
+    hidden = Games.visible_ballot_totals(game, "president", town2.user.id)
+    assert hidden.tallies == %{}
+    assert hidden.voters_by_target == %{}
+    assert hidden.unvoted == []
+    assert hidden.total == 0
+
+    moderator = Games.visible_ballot_totals(game, "president", host.id)
+    assert moderator.voters_by_target[town2.player.id] == [town1.user.username]
+    assert town2.user.username in moderator.unvoted
+  end
+
+  test "status rules and player overrides can let a dead player vote" do
+    %{game: game, host: host, players: [mafia, town1, _town2, _town3]} =
+      started_game([:mafia, :town, :town, :town])
+
+    ballot =
+      game.ruleset
+      |> GameRules.ballot("elimination")
+      |> Map.put("eligible_statuses", ["active", "dead"])
+
+    rules = Map.put(game.ruleset, "ballots", [ballot])
+    {:ok, game} = Games.update_rules(game, host.id, rules, "Dead may vote by exception")
+
+    assert {:ok, dead} =
+             Games.moderate_player(game, town1.player.id, host.id, %{
+               status: "dead",
+               capability_overrides: %{"vote" => true}
+             })
+
+    assert dead.status == "dead"
+    refute dead.is_alive
+    assert {:ok, _vote} = Games.cast_vote(game, town1.user.id, mafia.player.id)
+  end
+
+  test "reaction and posting capabilities stay independent in the game thread" do
+    rules =
+      GameRules.default()
+      |> Map.put("win_mode", "moderator")
+      |> put_in(["status_capabilities", "dead"], ["react"])
+
+    %{game: game, host: host, players: [_mafia, town1, _town2]} =
+      started_game([:mafia, :town, :town], rules)
+
+    assert {:ok, _dead} =
+             Games.moderate_player(game, town1.player.id, host.id, %{status: "dead"})
+
+    assert {:ok, message} =
+             Chat.send_message(
+               game.day_thread_conversation_id,
+               host.id,
+               "The record remains open"
+             )
+
+    assert {:error, :muted} =
+             Chat.send_message(game.day_thread_conversation_id, town1.user.id, "I cannot post")
+
+    assert {:ok, reaction} = Chat.toggle_reaction(message.id, town1.user.id, "👍")
+    assert reaction.emoji == "👍"
+  end
+
+  test "private faction membership follows the configured phase window" do
+    %{game: game, players: [mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    assert {:error, :not_found} =
+             Chat.get_conversation_for_user(game.mafia_chat_conversation_id, mafia.user.id)
+
+    assert {:ok, night} = Games.resolve_day(game)
+    assert night.status == :night
+
+    assert {:ok, _conversation} =
+             Chat.get_conversation_for_user(game.mafia_chat_conversation_id, mafia.user.id)
+  end
+
+  test "moderator inclusion is reconciled for existing private rooms" do
+    rules = Map.put(GameRules.default(), "private_chat_include_moderator", false)
+
+    %{game: game, host: host, players: [_mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town], rules)
+
+    {:ok, night} = Games.resolve_day(game)
+
+    assert {:error, :not_found} =
+             Chat.get_conversation_for_user(night.mafia_chat_conversation_id, host.id)
+
+    {:ok, included} =
+      Games.update_rules(
+        night,
+        host.id,
+        Map.put(night.ruleset, "private_chat_include_moderator", true),
+        "Moderator joins private rooms"
+      )
+
+    assert {:ok, _conversation} =
+             Chat.get_conversation_for_user(included.mafia_chat_conversation_id, host.id)
+
+    {:ok, excluded} =
+      Games.update_rules(
+        included,
+        host.id,
+        Map.put(included.ruleset, "private_chat_include_moderator", false),
+        "Moderator leaves private rooms"
+      )
+
+    assert {:error, :not_found} =
+             Chat.get_conversation_for_user(excluded.mafia_chat_conversation_id, host.id)
+  end
+
+  test "concurrent day resolution advances and narrates exactly once" do
+    %{game: game, host: host} = started_game([:mafia, :town, :town, :town])
+
+    results =
+      1..2
+      |> Enum.map(fn _ -> Task.async(fn -> Games.resolve_day(game) end) end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.all?(results, &match?({:ok, _game}, &1))
+
+    resolved = Games.get_game!(game.id)
+    assert resolved.status == :night
+    assert resolved.phase_number == 2
+
+    assert {:ok, messages} = Chat.list_messages(game.day_thread_conversation_id, host.id)
+    assert Enum.count(messages, &String.starts_with?(&1.body, "Night falls")) == 1
+  end
+
+  test "moderator win mode supports free-form factions and explicit winners" do
+    rules = GameRules.default() |> Map.put("win_mode", "moderator")
+
+    %{game: game, host: host, players: [_red, blue, _green]} =
+      started_game(["Red", "Blue", "Green"], rules)
+
+    assert {:ok, _} = Games.eliminate(game, blue.player.id, :modkill, host.id)
+    assert Games.get_game!(game.id).status == :day
+
+    assert {:ok, finished} = Games.declare_winner(Games.get_game!(game.id), "Red", host.id)
+    assert finished.status == :finished
+    assert finished.winner_faction == "Red"
+  end
+
+  test "a private notebook lazily stores general and per-player notes" do
+    %{game: game, players: [mafia, town1, _town2]} = started_game([:mafia, :town, :town])
+    outsider = Fixtures.user_fixture()
+
+    assert Games.notebook(game, town1.user.id) == %{"general" => ""}
+
+    assert {:ok, _saved} =
+             Games.save_notebook(game, town1.user.id, %{
+               "general" => "Track claims",
+               mafia.player.id => "Pressure tomorrow",
+               Ecto.UUID.generate() => "Not in this game"
+             })
+
+    assert Games.notebook(game, town1.user.id) == %{
+             "general" => "Track claims",
+             mafia.player.id => "Pressure tomorrow"
+           }
+
+    assert {:error, :not_a_player} =
+             Games.save_notebook(game, outsider.id, %{"general" => "No access"})
+  end
+
+  defp started_game(alignments, ruleset \\ nil) do
+    host = Fixtures.user_fixture()
+
+    attrs =
+      %{title: "Test Game"}
+      |> then(fn attrs -> if ruleset, do: Map.put(attrs, :ruleset, ruleset), else: attrs end)
+
+    {:ok, game} = Games.create_game(host.id, attrs)
 
     players =
       Enum.map(alignments, fn alignment ->

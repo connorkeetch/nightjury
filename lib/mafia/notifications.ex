@@ -88,6 +88,12 @@ defmodule Mafia.Notifications do
   def subscribe(user_id),
     do: Phoenix.PubSub.subscribe(Mafia.PubSub, "notifications:#{user_id}")
 
+  @doc "Publishes a refresh without creating another notification row."
+  def refresh_users(user_ids) do
+    user_ids |> Enum.uniq() |> Enum.each(&broadcast/1)
+    :ok
+  end
+
   defp broadcast(user_id),
     do: Phoenix.PubSub.broadcast(Mafia.PubSub, "notifications:#{user_id}", :notifications_changed)
 end

@@ -5,8 +5,9 @@ defmodule Mafia.Workers.MafiaReconcilerWorker do
   A single `MafiaPhaseWorker` job scheduled up to 24h out has no self-healing: if
   it is lost (a Railway redeploy near the firing time, a cancelled/pruned job),
   nothing reschedules it and the game would stall forever. This reconciler scans
-  for games whose deadline has passed and force-advances them — resolving overdue
-  Days and nudging overdue Nights. See `docs/planning/mafia-side-game.md`.
+  for games whose deadline has passed and reapplies their configured deadline
+  policy — resolving automated Days and nudging moderator-run phases. See
+  `docs/planning/mafia-side-game.md`.
 
   Runs via Oban cron (configured in config.exs).
   """
@@ -33,10 +34,7 @@ defmodule Mafia.Workers.MafiaReconcilerWorker do
     end
 
     Enum.each(overdue, fn game ->
-      case game.status do
-        :day -> Games.resolve_day(game)
-        :night -> Games.nudge_night_overdue(game)
-      end
+      Games.handle_phase_deadline(game)
     end)
 
     :ok
