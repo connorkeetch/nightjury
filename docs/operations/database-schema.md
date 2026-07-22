@@ -1,8 +1,7 @@
 # Mafia standalone database
 
 The standalone service owns a deliberately small PostgreSQL schema. Its source
-of truth is
-[`priv/repo/migrations/20260720000100_create_mafia_schema.exs`](../../priv/repo/migrations/20260720000100_create_mafia_schema.exs).
+of truth is [`priv/repo/migrations/`](../../priv/repo/migrations/).
 
 ## Owned data
 
@@ -15,8 +14,9 @@ of truth is
 | Jobs | Oban's `oban_jobs`, `oban_peers`, and supporting objects |
 
 The `users` table retains the source columns needed for a lossless one-time
-`pg_dump`/`pg_restore`, even though the Mafia app exposes only username, email,
-password hash, avatar, tagline, and bio. `conversations.game_id` and
+`pg_dump`/`pg_restore`, including the compatibility-only
+`hide_from_leaderboards` field, even though the Mafia app exposes only username,
+email, password hash, avatar, tagline, and bio. `conversations.game_id` and
 `notifications.game_id` are compatibility columns without Risk foreign keys.
 
 The app does not own Risk games, maps, rankings, clans, achievements, social

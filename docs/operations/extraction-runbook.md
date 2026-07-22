@@ -18,13 +18,14 @@ and PostgreSQL database. There is no dual-write period.
 - Plan a full ConquestK outage for the copy window. Scale every ConquestK web
   and worker service to zero before the source backup/manifest is captured, and
   keep them at zero through the standalone read-only verification.
-- A manual ConquestK database backup exists and its direct (port 5432) URL is available.
+- A manual ConquestK database backup exists and its Railway
+  `DATABASE_PUBLIC_URL` is available.
 - The target is a dedicated Mafia PostgreSQL database with the standalone
   baseline migration applied and no application rows or Oban jobs yet.
 - `psql`, `pg_dump`, and `pg_restore` are on the operator's `PATH`.
 
-Use direct database URLs, not PgBouncer URLs. Never paste either URL into a log,
-issue, or committed file.
+Use each database service's `DATABASE_PUBLIC_URL` with PostgreSQL 18 client
+tools. Never paste either URL into a log, issue, or committed file.
 
 Set `MAFIA_WRITES_ENABLED=false` for migration and smoke testing. Production
 defaults to false when the variable is absent, so an incomplete deployment
