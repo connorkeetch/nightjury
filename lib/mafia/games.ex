@@ -1419,7 +1419,6 @@ defmodule Mafia.Games do
            muted?
          ) do
       {:ok, _membership} -> :ok
-      {:error, :not_a_member} -> :ok
       {:error, _reason} = error -> error
     end
   end
