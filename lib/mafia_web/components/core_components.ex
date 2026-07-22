@@ -192,10 +192,13 @@ defmodule MafiaWeb.CoreComponents do
 
   def header(assigns) do
     ~H"""
-    <header class={["pb-4", @actions != [] && "flex items-center justify-between gap-6"]}>
-      <div>
-        <h1 class="text-xl font-semibold">{render_slot(@inner_block)}</h1>
-        <p :if={@subtitle != []} class="mt-1 text-sm text-[color:var(--text-muted)]">
+    <header class={["pb-6", @actions != [] && "flex items-center justify-between gap-6"]}>
+      <div class="min-w-0">
+        <h1 class="page-heading">{render_slot(@inner_block)}</h1>
+        <p
+          :if={@subtitle != []}
+          class="mt-2 max-w-2xl text-sm leading-6 text-[color:var(--text-muted)]"
+        >
           {render_slot(@subtitle)}
         </p>
       </div>

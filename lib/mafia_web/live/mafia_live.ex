@@ -13,7 +13,7 @@ defmodule MafiaWeb.MafiaLive do
 
     {:ok,
      socket
-     |> assign(:page_title, "Mafia")
+     |> assign(:page_title, "Games")
      |> assign(:title, "")
      |> assign(:lobby_type, "open")
      |> load_games()}
@@ -57,86 +57,141 @@ defmodule MafiaWeb.MafiaLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="max-w-4xl mx-auto px-4 py-6 space-y-8">
-      <div>
-        <h1 class="text-2xl font-bold text-[color:var(--text)]">Mafia</h1>
-        <p class="text-[color:var(--text-muted)] mt-1">
-          A play-by-post game of hidden roles. A human moderator runs each game;
-          the site handles the vote count, the day/night clock, and silencing the dead.
-        </p>
-      </div>
+    <div class="mx-auto max-w-5xl space-y-10">
+      <section class="lobby-hero">
+        <div>
+          <p class="eyebrow">Moderated social deduction</p>
+          <h1 class="display-heading">One verdict before dawn.</h1>
+          <p class="lede mt-6">
+            Night Jury is a play-by-post game of hidden roles and public arguments. A human
+            moderator runs each game; we keep the vote count, the day/night clock, and the dead
+            respectfully silent.
+          </p>
+          <div class="mt-6 flex flex-wrap gap-2" aria-label="Game features">
+            <span class="status-chip"><.icon name="hero-user-group" class="size-4" /> Human run</span>
+            <span class="status-chip"><.icon name="hero-clock" class="size-4" /> Asynchronous</span>
+            <span class="status-chip status-chip-wax">
+              <.icon name="hero-eye-slash" class="size-4" /> Hidden roles
+            </span>
+          </div>
+        </div>
+        <div class="hero-seal" aria-hidden="true">
+          <.icon name="hero-scale" class="size-14" />
+        </div>
+      </section>
 
-      <%= if @current_user do %>
-        <form
-          id="mafia-create-form"
-          phx-change="validate"
-          phx-submit="create_game"
-          class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4 space-y-4"
-        >
-          <h2 class="font-semibold text-[color:var(--text)]">Host a new game</h2>
-          <div class="flex flex-col sm:flex-row gap-3">
-            <input
-              type="text"
-              name="title"
-              value={@title}
-              placeholder="Game title (optional)"
-              maxlength="120"
-              class="flex-1 rounded-md border border-[color:var(--border)] bg-[color:var(--surface-2)] px-3 py-2 text-[color:var(--text)]"
-            />
-            <select
-              name="lobby_type"
-              class="rounded-md border border-[color:var(--border)] bg-[color:var(--surface-2)] px-3 py-2 text-[color:var(--text)]"
-            >
-              <option value="open" selected={@lobby_type == "open"}>Open lobby</option>
-              <option value="invite" selected={@lobby_type == "invite"}>Invite only</option>
-            </select>
+      <div class="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:items-start">
+        <%= if @current_user do %>
+          <form
+            id="mafia-create-form"
+            phx-change="validate"
+            phx-submit="create_game"
+            class="panel space-y-5"
+          >
+            <div class="flex items-start gap-3">
+              <span class="phase-icon size-10 shrink-0" aria-hidden="true">
+                <.icon name="hero-key" class="size-5" />
+              </span>
+              <div>
+                <h2 class="section-heading">Take the moderator's chair</h2>
+                <p class="mt-1 text-sm text-[color:var(--text-muted)]">
+                  Name the game, choose the door policy, then assign roles inside.
+                </p>
+              </div>
+            </div>
+
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-semibold">Game title</span>
+              <input
+                type="text"
+                name="title"
+                value={@title}
+                placeholder="The Long Night"
+                maxlength="120"
+                class="input"
+              />
+            </label>
+
+            <label class="block">
+              <span class="mb-1.5 block text-sm font-semibold">Who can join?</span>
+              <select name="lobby_type" class="input">
+                <option value="open" selected={@lobby_type == "open"}>Anyone — open lobby</option>
+                <option value="invite" selected={@lobby_type == "invite"}>
+                  Invited players only
+                </option>
+              </select>
+            </label>
+
             <button
               type="submit"
-              class="rounded-md bg-[color:var(--color-primary)] px-4 py-2 font-medium text-[color:var(--color-on-primary)] whitespace-nowrap"
+              class="btn btn-primary w-full"
+              phx-disable-with="Opening the room…"
             >
-              Create game
+              <.icon name="hero-plus" class="size-5" /> Create game
             </button>
-          </div>
-          <p class="text-xs text-[color:var(--text-muted)]">
-            You'll be the moderator: assign roles, then start the game. The mod doesn't play.
-          </p>
-        </form>
-      <% else %>
-        <div class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4">
-          <.link navigate={~p"/users/log-in"} class="text-[color:var(--link)] font-medium">
-            Log in
-          </.link>
-          <span class="text-[color:var(--text-muted)]">to host a game.</span>
-        </div>
-      <% end %>
-
-      <div class="space-y-3">
-        <h2 class="font-semibold text-[color:var(--text)]">Open games</h2>
-        <%= if @games == [] do %>
-          <p class="text-[color:var(--text-muted)]">
-            No open games on file. The moderator's chair is available.
-          </p>
+            <p class="text-xs leading-5 text-[color:var(--text-muted)]">
+              The moderator oversees the room and doesn't take a player role.
+            </p>
+          </form>
         <% else %>
-          <ul class="space-y-2">
-            <li
-              :for={game <- @games}
-              class="flex items-center justify-between rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-3"
-            >
-              <div>
-                <div class="font-medium text-[color:var(--text)]">
-                  {game.title || "Untitled game"}
-                </div>
-                <div class="text-xs text-[color:var(--text-muted)]">In setup · open lobby</div>
-              </div>
-              <.link
-                navigate={~p"/mafia/#{game.id}"}
-                class="rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm text-[color:var(--text)] hover:bg-[color:var(--surface-2)]"
-              >
-                View
-              </.link>
-            </li>
-          </ul>
+          <aside class="panel">
+            <span class="phase-icon mb-4" aria-hidden="true">
+              <.icon name="hero-key" class="size-5" />
+            </span>
+            <h2 class="section-heading">The chair is open</h2>
+            <p class="mt-2 text-sm leading-6 text-[color:var(--text-muted)]">
+              Sign in to host a room, invite players, and keep the night moving.
+            </p>
+            <.link navigate={~p"/users/log-in"} class="btn btn-primary mt-5">
+              Log in to host <.icon name="hero-arrow-right" class="size-4" />
+            </.link>
+          </aside>
         <% end %>
+
+        <section aria-labelledby="open-games-heading">
+          <div class="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <p class="eyebrow">Now assembling</p>
+              <h2 id="open-games-heading" class="section-heading mt-2">Open games</h2>
+            </div>
+            <span class="status-chip">{length(@games)} listed</span>
+          </div>
+
+          <%= if @games == [] do %>
+            <div class="empty-state">
+              <div>
+                <span class="empty-state-icon" aria-hidden="true">
+                  <.icon name="hero-moon" class="size-6" />
+                </span>
+                <p class="font-semibold text-[color:var(--text)]">The room is quiet—for now.</p>
+                <p class="mt-1 text-sm">No open games on file. The moderator's chair is available.</p>
+              </div>
+            </div>
+          <% else %>
+            <ul class="space-y-3">
+              <li :for={game <- @games}>
+                <.link
+                  navigate={~p"/mafia/#{game.id}"}
+                  class="panel panel-interactive flex items-center justify-between gap-4 no-underline"
+                >
+                  <div class="min-w-0">
+                    <p class="truncate font-semibold text-[color:var(--text)]">
+                      {game.title || "Untitled game"}
+                    </p>
+                    <p class="mt-1 text-xs text-[color:var(--text-muted)]">
+                      In setup · {if Games.lobby_type(game) == "open",
+                        do: "open lobby",
+                        else: "invite only"}
+                    </p>
+                  </div>
+                  <span class="flex shrink-0 items-center gap-2 text-sm font-semibold text-[color:var(--link)]">
+                    Enter <.icon name="hero-arrow-right" class="size-4" />
+                  </span>
+                </.link>
+              </li>
+            </ul>
+          <% end %>
+        </section>
       </div>
     </div>
     """

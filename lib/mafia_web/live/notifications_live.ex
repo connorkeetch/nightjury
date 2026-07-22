@@ -40,8 +40,14 @@ defmodule MafiaWeb.NotificationsLive do
         </:actions>
       </.header>
 
-      <div :if={@notifications == []} class="panel text-[color:var(--text-muted)]">
-        No notifications yet.
+      <div :if={@notifications == []} class="empty-state">
+        <div>
+          <span class="empty-state-icon" aria-hidden="true">
+            <.icon name="hero-bell-slash" class="size-6" />
+          </span>
+          <p class="font-semibold text-[color:var(--text)]">Nothing needs your attention</p>
+          <p class="mt-1 text-sm">Phase updates and mentions will appear here.</p>
+        </div>
       </div>
 
       <div class="space-y-3">
@@ -49,15 +55,25 @@ defmodule MafiaWeb.NotificationsLive do
           :for={notification <- @notifications}
           class={[
             "panel",
-            is_nil(notification.read_at) && "border-[color:var(--link)]"
+            is_nil(notification.read_at) && "border-[color:rgba(201,104,82,0.58)]"
           ]}
         >
           <div class="flex items-start justify-between gap-4">
             <div>
-              <p class="font-semibold">{notification.title}</p>
+              <div class="flex flex-wrap items-center gap-2">
+                <p class="font-semibold">{notification.title}</p>
+                <span :if={is_nil(notification.read_at)} class="status-chip status-chip-wax">Unread</span>
+              </div>
               <p :if={notification.body} class="mt-1 text-sm text-[color:var(--text-muted)]">
                 {notification.body}
               </p>
+              <time
+                :if={notification.created_at}
+                datetime={DateTime.to_iso8601(notification.created_at)}
+                class="mono mt-2 block text-xs text-[color:var(--text-muted)]"
+              >
+                {Calendar.strftime(notification.created_at, "%b %-d, %H:%M")}
+              </time>
               <.link
                 :if={notification.metadata["mafia_game_id"]}
                 navigate={~p"/mafia/#{notification.metadata["mafia_game_id"]}"}
@@ -71,7 +87,7 @@ defmodule MafiaWeb.NotificationsLive do
               type="button"
               phx-click="mark_read"
               phx-value-id={notification.id}
-              class="text-sm text-[color:var(--link)]"
+              class="btn btn-quiet shrink-0 text-sm"
             >
               Mark read
             </button>

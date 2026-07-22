@@ -37,9 +37,12 @@ defmodule MafiaWeb.ChatLive do
     ~H"""
     <section class="mx-auto flex max-w-4xl flex-col gap-4">
       <header class="flex items-center gap-3">
-        <.link navigate={~p"/messages"} aria-label="Back to messages">←</.link>
-        <div>
-          <h1 class="text-xl font-semibold">{@conversation.title || "Mafia chat"}</h1>
+        <.link navigate={~p"/messages"} class="btn btn-quiet" aria-label="Back to messages">
+          <.icon name="hero-arrow-left" class="size-4" />
+        </.link>
+        <div class="min-w-0">
+          <p class="eyebrow">Conversation</p>
+          <h1 class="section-heading mt-1 truncate">{@conversation.title || "Mafia chat"}</h1>
           <p :if={@conversation.is_read_only} class="text-sm text-[color:var(--warning-text)]">
             This thread is locked until the next day phase.
           </p>
@@ -47,11 +50,21 @@ defmodule MafiaWeb.ChatLive do
       </header>
 
       <div id="messages" class="panel min-h-80 space-y-5">
-        <p :if={@messages == []} class="text-center text-[color:var(--text-muted)]">
-          No messages yet.
-        </p>
+        <div :if={@messages == []} class="empty-state min-h-64 border-0 bg-transparent">
+          <div>
+            <span class="empty-state-icon" aria-hidden="true">
+              <.icon name="hero-chat-bubble-bottom-center-text" class="size-6" />
+            </span>
+            <p class="font-semibold text-[color:var(--text)]">The floor is open.</p>
+            <p class="mt-1 text-sm">No messages yet.</p>
+          </div>
+        </div>
 
-        <article :for={message <- @messages} id={"message-#{message.id}"} class="group">
+        <article
+          :for={message <- @messages}
+          id={"message-#{message.id}"}
+          class="group border-b border-[color:var(--border)] pb-5 last:border-0 last:pb-0"
+        >
           <div class="flex items-baseline gap-2">
             <.link
               navigate={~p"/users/#{message.user.username}"}
@@ -59,7 +72,10 @@ defmodule MafiaWeb.ChatLive do
             >
               {message.user.username}
             </.link>
-            <time class="text-xs text-[color:var(--text-muted)]">
+            <time
+              datetime={DateTime.to_iso8601(message.created_at)}
+              class="mono text-xs text-[color:var(--text-muted)]"
+            >
               {Calendar.strftime(message.created_at, "%b %-d, %H:%M")}
             </time>
           </div>
@@ -78,10 +94,11 @@ defmodule MafiaWeb.ChatLive do
               phx-value-message-id={message.id}
               phx-value-emoji={emoji}
               class={[
-                "min-h-8 rounded-full border border-[color:var(--border)] px-2 text-xs",
+                "min-h-9 rounded-full border border-[color:var(--border)] px-2 text-xs",
                 reacted?(message, @current_user.id, emoji) && "bg-[color:var(--surface-2)]"
               ]}
-              aria-label={"React #{emoji}"}
+              aria-label={"React with #{emoji}; #{reaction_count(message, emoji)} reactions"}
+              aria-pressed={reacted?(message, @current_user.id, emoji)}
             >
               {emoji} {reaction_count(message, emoji)}
             </button>
@@ -93,18 +110,26 @@ defmodule MafiaWeb.ChatLive do
         for={to_form(%{"body" => @message}, as: :message)}
         id="message-form"
         phx-submit="send_message"
-        class="flex gap-2"
+        class="flex items-end gap-2"
       >
-        <.input
-          name="message[body]"
-          value={@message}
-          aria-label="Message"
-          placeholder={
-            if @conversation.is_read_only, do: "Thread is read-only", else: "Write a message…"
-          }
+        <div class="min-w-0 flex-1">
+          <.input
+            name="message[body]"
+            value={@message}
+            aria-label="Message"
+            placeholder={
+              if @conversation.is_read_only, do: "Thread is read-only", else: "Write a message…"
+            }
+            disabled={@conversation.is_read_only}
+          />
+        </div>
+        <.button
+          variant="primary"
           disabled={@conversation.is_read_only}
-        />
-        <.button variant="primary" disabled={@conversation.is_read_only}>Send</.button>
+          phx-disable-with="Sending…"
+        >
+          <.icon name="hero-paper-airplane" class="size-4" /> Send
+        </.button>
       </.form>
     </section>
     """
