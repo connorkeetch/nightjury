@@ -1356,7 +1356,9 @@ defmodule Mafia.Games do
   end
 
   defp lock_game_for_update(game_id) do
-    case Repo.query("SELECT id FROM mafia_games WHERE id = $1::uuid FOR UPDATE", [game_id]) do
+    dumped_id = Ecto.UUID.dump!(game_id)
+
+    case Repo.query("SELECT id FROM mafia_games WHERE id = $1::uuid FOR UPDATE", [dumped_id]) do
       {:ok, %{num_rows: 1}} -> :ok
       {:ok, _result} -> {:error, :not_found}
       {:error, reason} -> {:error, reason}
