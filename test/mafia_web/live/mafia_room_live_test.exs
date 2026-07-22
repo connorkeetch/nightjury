@@ -59,7 +59,23 @@ defmodule MafiaWeb.MafiaRoomLiveTest do
     |> form(~s|form[phx-submit="add_player"]|, %{name: invitee.email})
     |> render_submit()
 
-    assert has_element?(view, "h2", "Players (1)")
+    assert has_element?(view, ".status-chip", "1 seated")
+  end
+
+  test "starting a game is separate from saving role edits", %{conn: conn} do
+    context = game_in(:setup)
+    {:ok, view, _html} = live(log_in_user(conn, context.host), ~p"/mafia/#{context.game.id}")
+
+    assert has_element?(
+             view,
+             "form[phx-submit='assign_roles'] button[type='submit']",
+             "Save roles"
+           )
+
+    assert has_element?(
+             view,
+             "form[phx-submit='assign_roles'] button[type='button'][phx-click='start']"
+           )
   end
 
   defp game_in(status) do

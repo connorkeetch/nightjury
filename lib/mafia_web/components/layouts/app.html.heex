@@ -1,32 +1,76 @@
-<header class="border-b border-[color:var(--border)] bg-[color:var(--glass-bg)] backdrop-blur-xl">
-  <nav
-    class="mx-auto flex min-h-14 max-w-6xl items-center justify-between gap-4 px-4"
-    aria-label="Primary"
-  >
-    <.link navigate={~p"/"} class="text-lg font-semibold tracking-wide text-[color:var(--text)]">
-      Nightjury
+<a href="#main-content" class="skip-link">Skip to content</a>
+<header class="site-header">
+  <nav class="site-nav" aria-label="Primary">
+    <.link navigate={~p"/"} class="brand" aria-label="Night Jury home">
+      <span class="brand-mark" aria-hidden="true">
+        <.icon name="hero-scale" class="size-5" />
+      </span>
+      <span>
+        <span class="brand-name">Night Jury</span>
+        <span class="brand-kicker">Play after dark</span>
+      </span>
     </.link>
 
-    <div class="flex items-center gap-4 text-sm">
-      <.link navigate={~p"/"}>Games</.link>
+    <div class="nav-links">
+      <.link navigate={~p"/"} class="nav-link" aria-label="Games" title="Games">
+        <.icon name="hero-rectangle-stack" class="size-5" />
+        <span class="nav-link-label">Games</span>
+      </.link>
       <%= if assigns[:current_user] do %>
-        <.link navigate={~p"/messages"}>Chat</.link>
-        <.link navigate={~p"/notifications"}>Notifications</.link>
-        <.link navigate={~p"/profile"}>{@current_user.username}</.link>
-        <.link href={~p"/users/log-out"} method="delete">Sign out</.link>
+        <.link navigate={~p"/messages"} class="nav-link" aria-label="Chat" title="Chat">
+          <.icon name="hero-chat-bubble-left-right" class="size-5" />
+          <span class="nav-link-label">Chat</span>
+        </.link>
+        <.link
+          navigate={~p"/notifications"}
+          class="nav-link"
+          aria-label="Notifications"
+          title="Notifications"
+        >
+          <.icon name="hero-bell" class="size-5" />
+          <span class="nav-link-label">Alerts</span>
+        </.link>
+        <.link
+          navigate={~p"/profile"}
+          class="nav-link nav-link-profile"
+          aria-label={"Profile for #{@current_user.username}"}
+          title={@current_user.username}
+        >
+          <.icon name="hero-user-circle" class="size-5" />
+          <span class="nav-link-label max-w-28 truncate">{@current_user.username}</span>
+        </.link>
+        <.link
+          href={~p"/users/log-out"}
+          method="delete"
+          class="nav-link nav-link-quiet"
+          aria-label="Sign out"
+          title="Sign out"
+        >
+          <.icon name="hero-arrow-right-start-on-rectangle" class="size-5" />
+          <span class="nav-link-label">Sign out</span>
+        </.link>
       <% else %>
-        <.link navigate={~p"/users/log-in"}>Sign in</.link>
+        <.link
+          navigate={~p"/users/log-in"}
+          class="nav-link nav-link-profile"
+          aria-label="Sign in"
+        >
+          <.icon name="hero-arrow-right-end-on-rectangle" class="size-5" />
+          <span class="nav-link-label">Sign in</span>
+        </.link>
       <% end %>
     </div>
   </nav>
 </header>
-<main class="mx-auto min-h-[calc(100vh-3.5rem)] max-w-6xl px-4 py-8">
+<main id="main-content" class="site-main" tabindex="-1">
   <div
     :if={!Mafia.WriteGate.enabled?()}
-    class="mb-6 rounded-lg border border-[color:var(--warning-text)] px-4 py-3 text-sm text-[color:var(--warning-text)]"
+    class="read-only-banner"
   >
+    <.icon name="hero-lock-closed" class="size-5 shrink-0" />
     Read-only while the one-time data move is being verified.
   </div>
-  <.flash_group flash={@flash} />
-  {if assigns[:inner_content], do: @inner_content, else: render_slot(@inner_block)}
+  <.flash_group flash={@flash} /> {if assigns[:inner_content],
+    do: @inner_content,
+    else: render_slot(@inner_block)}
 </main>

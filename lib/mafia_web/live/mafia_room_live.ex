@@ -251,44 +251,55 @@ defmodule MafiaWeb.MafiaRoomLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="max-w-4xl mx-auto px-4 py-6 space-y-6">
-      <div class="flex items-center justify-between">
-        <div>
-          <h1 class="text-2xl font-bold text-[color:var(--text)]">{@game.title || "Mafia"}</h1>
-          <p class="text-sm text-[color:var(--text-muted)]">{status_line(assigns)}</p>
+    <div class="mx-auto max-w-5xl space-y-6">
+      <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div class="min-w-0">
+          <p class="eyebrow">Case file</p>
+          <h1 class="page-heading mt-2 truncate">{@game.title || "Untitled game"}</h1>
         </div>
-        <div class="flex items-center gap-4">
-          <button
-            :if={@is_host}
-            phx-click="delete_game"
-            data-confirm="Delete this game permanently? This can't be undone."
-            class="text-sm text-[color:var(--text-muted)] hover:text-red-400"
-          >
-            Delete game
-          </button>
-          <.link
-            navigate={~p"/mafia"}
-            class="text-sm text-[color:var(--text-muted)] hover:text-[color:var(--text)]"
-          >
-            ← All games
-          </.link>
+        <.link navigate={~p"/mafia"} class="btn btn-quiet self-start sm:self-auto">
+          <.icon name="hero-arrow-left" class="size-4" /> All games
+        </.link>
+      </header>
+
+      <section class="phase-banner" aria-label="Current game phase">
+        <span class="phase-icon" aria-hidden="true">
+          <.icon name={phase_icon(@game.status)} class="size-5" />
+        </span>
+        <div class="min-w-0">
+          <p class="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[color:var(--text-muted)]">
+            Current phase
+          </p>
+          <h2 class="section-heading mt-0.5">{phase_label(@game)}</h2>
         </div>
-      </div>
+        <p class="mono text-xs leading-5 text-[color:var(--text-muted)] sm:text-right">
+          {status_line(assigns)}
+        </p>
+      </section>
 
       <%= if @my_player && @my_player.role_name do %>
-        <div class="rounded-lg border border-[color:var(--color-primary)] bg-[color:var(--surface-1)] p-3">
-          <div class="text-xs uppercase tracking-wide text-[color:var(--text-muted)]">Your role</div>
-          <div class="font-semibold text-[color:var(--text)]">
-            {@my_player.role_name}
-            <span class="text-[color:var(--text-muted)]">({@my_player.alignment})</span>
+        <section class="panel role-card">
+          <div class="flex items-start gap-3">
+            <span class="phase-icon shrink-0 border-[color:rgba(201,104,82,0.35)] text-[color:var(--wax)]">
+              <.icon name="hero-identification" class="size-5" />
+            </span>
+            <div class="min-w-0">
+              <p class="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[color:var(--text-muted)]">
+                Your private role
+              </p>
+              <h2 class="mt-1 font-[family-name:var(--font-display)] text-2xl font-bold text-[color:var(--text)]">
+                {@my_player.role_name}
+              </h2>
+              <span class="status-chip status-chip-wax mt-2">{@my_player.alignment}</span>
+            </div>
           </div>
           <p
             :if={@my_player.role_pm_body}
-            class="text-sm text-[color:var(--text-muted)] mt-1 whitespace-pre-wrap"
+            class="mt-4 whitespace-pre-wrap border-t border-[color:var(--border)] pt-4 text-sm leading-6 text-[color:var(--text-soft)]"
           >
             {@my_player.role_pm_body}
           </p>
-        </div>
+        </section>
       <% end %>
 
       {render_body(assigns)}
@@ -297,27 +308,38 @@ defmodule MafiaWeb.MafiaRoomLive do
   end
 
   defp status_line(%{game: %{status: :setup}}),
-    do: "In setup — waiting for the moderator to start."
+    do: "Waiting for the moderator"
 
   defp status_line(%{game: %{status: :finished} = g}),
-    do: "Finished — the #{g.winner_faction} win."
+    do: "The #{g.winner_faction} win"
 
-  defp status_line(%{game: %{status: status} = g} = assigns) do
+  defp status_line(%{game: g} = assigns) do
     left = time_left(g.phase_ends_at, assigns[:now] || DateTime.utc_now())
 
-    "#{String.capitalize(to_string(status))} #{day_number(g)} · #{left} · deadline #{deadline_text(g.phase_ends_at)}"
+    "#{left} · closes #{deadline_text(g.phase_ends_at)}"
   end
+
+  defp phase_label(%{status: :setup}), do: "Room setup"
+  defp phase_label(%{status: :finished}), do: "Final verdict"
+
+  defp phase_label(%{status: status} = game),
+    do: "#{String.capitalize(to_string(status))} #{day_number(game)}"
+
+  defp phase_icon(:setup), do: "hero-key"
+  defp phase_icon(:day), do: "hero-sun"
+  defp phase_icon(:night), do: "hero-moon"
+  defp phase_icon(:finished), do: "hero-scale"
 
   # ---- setup ----------------------------------------------------------------
 
   defp render_body(%{game: %{status: :setup}} = assigns) do
     ~H"""
     <div class="space-y-6">
-      <details class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4">
-        <summary class="font-semibold text-[color:var(--text)] cursor-pointer">
-          How Mafia works
+      <details class="panel">
+        <summary class="cursor-pointer font-semibold text-[color:var(--text)]">
+          How Night Jury works
         </summary>
-        <div class="text-sm text-[color:var(--text-muted)] mt-2 space-y-1">
+        <div class="mt-3 space-y-2 text-sm leading-6 text-[color:var(--text-muted)]">
           <p>
             Each day, everyone discusses in the Town Square and casts a vote to lynch one player.
             When a target hits the hammer (a majority) or the day deadline passes, they're out and
@@ -331,93 +353,127 @@ defmodule MafiaWeb.MafiaRoomLive do
         </div>
       </details>
 
-      <div class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4">
-        <h2 class="font-semibold text-[color:var(--text)] mb-2">Players ({length(@game.players)})</h2>
+      <section class="panel">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <h2 class="section-heading">Players</h2>
+          <span class="status-chip">{length(@game.players)} seated</span>
+        </div>
         <ul class="divide-y divide-[color:var(--border)]">
-          <li :for={p <- @game.players} class="flex items-center justify-between py-2">
-            <span class="text-[color:var(--text)]">{user_name(p.user)}</span>
+          <li :for={p <- @game.players} class="flex min-h-12 items-center justify-between gap-3 py-2">
+            <span class="flex min-w-0 items-center gap-2 text-[color:var(--text)]">
+              <.icon name="hero-user-circle" class="size-5 shrink-0 text-[color:var(--text-muted)]" />
+              <span class="truncate">{user_name(p.user)}</span>
+            </span>
             <button
               :if={@is_host}
+              type="button"
               phx-click="kick"
               phx-value-player_id={p.id}
-              class="text-xs text-[color:var(--text-muted)] hover:text-red-400"
+              class="btn btn-quiet shrink-0 text-xs hover:text-[color:var(--color-danger-text)]"
             >
               Remove
             </button>
           </li>
         </ul>
-        <p :if={@game.players == []} class="text-[color:var(--text-muted)] text-sm">
+        <p :if={@game.players == []} class="py-4 text-sm text-[color:var(--text-muted)]">
           No players on file. The moderator is accepting names.
         </p>
 
         <div :if={@current_user && !@is_host} class="mt-3">
           <%= cond do %>
             <% @my_player -> %>
-              <button phx-click="leave" class={btn_secondary()}>Leave</button>
+              <button type="button" phx-click="leave" class={btn_secondary()}>Leave game</button>
             <% Games.lobby_type(@game) == "open" -> %>
-              <button phx-click="join" class={btn_primary()}>Join game</button>
+              <button type="button" phx-click="join" class={btn_primary()}>Join game</button>
             <% true -> %>
               <span class="text-sm text-[color:var(--text-muted)]">
                 Invite only — the moderator adds players.
               </span>
           <% end %>
         </div>
-      </div>
+      </section>
 
-      <div
-        :if={@is_host}
-        class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4"
-      >
-        <h2 class="font-semibold text-[color:var(--text)] mb-2">Add a player</h2>
-        <form phx-submit="add_player" class="flex gap-2">
+      <section :if={@is_host} class="panel">
+        <h2 class="section-heading">Add a player</h2>
+        <p class="mt-1 text-sm text-[color:var(--text-muted)]">
+          Seat someone directly using their username or email.
+        </p>
+        <form phx-submit="add_player" class="mt-4 flex flex-col gap-2 sm:flex-row">
+          <label for="player-name" class="sr-only">Username or email</label>
           <input
+            id="player-name"
             type="text"
             name="name"
             placeholder="Username or email"
             required
-            class={input_class()}
+            class={[input_class(), "min-w-0 flex-1"]}
           />
-          <button type="submit" class={btn_secondary()}>Add</button>
+          <button type="submit" class={btn_secondary()} phx-disable-with="Adding…">
+            <.icon name="hero-user-plus" class="size-4" /> Add player
+          </button>
         </form>
-      </div>
+      </section>
 
       <%= if @is_host do %>
         <form
           phx-submit="assign_roles"
-          class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4 space-y-4"
+          class="panel space-y-5"
         >
-          <h2 class="font-semibold text-[color:var(--text)]">Assign roles, then start</h2>
-          <p class="text-xs text-[color:var(--text-muted)]">
-            Every player needs an alignment. The role name is free text — you resolve any powers by hand.
-          </p>
+          <div>
+            <h2 class="section-heading">Prepare the cast</h2>
+            <p class="mt-1 text-sm leading-6 text-[color:var(--text-muted)]">
+              Every player needs an alignment. Role names and private instructions are yours to write.
+            </p>
+          </div>
           <div
             :for={p <- @game.players}
-            class="space-y-1 border-b border-[color:var(--border)] pb-3 last:border-b-0"
+            class="space-y-2 border-b border-[color:var(--border)] pb-4 last:border-b-0"
           >
-            <div class="grid grid-cols-1 sm:grid-cols-[1fr_8rem_1fr] gap-2 items-center">
-              <div class="text-sm text-[color:var(--text)]">{user_name(p.user)}</div>
-              <select name={"roles[#{p.id}][alignment]"} class={input_class()}>
-                <option value="town" selected={p.alignment == :town}>Town</option>
-                <option value="mafia" selected={p.alignment == :mafia}>Mafia</option>
-              </select>
-              <input
-                type="text"
-                name={"roles[#{p.id}][role_name]"}
-                value={p.role_name}
-                placeholder="Role (e.g. Cop)"
-                class={input_class()}
-              />
+            <p class="text-sm font-semibold text-[color:var(--text)]">{user_name(p.user)}</p>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-[9rem_1fr]">
+              <label>
+                <span class="sr-only">Alignment for {user_name(p.user)}</span>
+                <select name={"roles[#{p.id}][alignment]"} class={input_class()}>
+                  <option value="town" selected={p.alignment == :town}>Town</option>
+                  <option value="mafia" selected={p.alignment == :mafia}>Mafia</option>
+                </select>
+              </label>
+              <label>
+                <span class="sr-only">Role for {user_name(p.user)}</span>
+                <input
+                  type="text"
+                  name={"roles[#{p.id}][role_name]"}
+                  value={p.role_name}
+                  placeholder="Role (for example, Detective)"
+                  class={input_class()}
+                />
+              </label>
             </div>
-            <textarea
-              name={"roles[#{p.id}][pm]"}
-              rows="2"
-              placeholder="Role PM (optional) — shown only to this player"
-              class={[input_class(), "w-full"]}
-            >{p.role_pm_body}</textarea>
+            <label class="block">
+              <span class="sr-only">Private role message for {user_name(p.user)}</span>
+              <textarea
+                name={"roles[#{p.id}][pm]"}
+                rows="2"
+                placeholder="Role PM (optional) — shown only to this player"
+                class={[input_class(), "w-full"]}
+              >{p.role_pm_body}</textarea>
+            </label>
           </div>
-          <div class="flex gap-2">
-            <button type="submit" class={btn_secondary()}>Save roles</button>
-            <button type="submit" phx-click="start" class={btn_primary()}>Start game</button>
+          <div class="flex flex-col gap-3 border-t border-[color:var(--border)] pt-4 sm:flex-row sm:items-center">
+            <button type="submit" class={btn_secondary()} phx-disable-with="Saving…">
+              Save roles
+            </button>
+            <button
+              type="button"
+              phx-click="start"
+              class={btn_primary()}
+              phx-disable-with="Starting…"
+            >
+              <.icon name="hero-play" class="size-4" /> Start game
+            </button>
+            <p class="text-xs text-[color:var(--text-muted)] sm:ml-auto">
+              Save any role edits before starting.
+            </p>
           </div>
         </form>
       <% end %>
@@ -432,28 +488,43 @@ defmodule MafiaWeb.MafiaRoomLive do
     <div class="space-y-6">
       <.thread_links game={@game} my_player={@my_player} />
 
-      <div class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4">
-        <div class="flex items-center justify-between mb-2">
-          <h2 class="font-semibold text-[color:var(--text)]">Vote to lynch</h2>
-          <span class="text-xs text-[color:var(--text-muted)]">
+      <section class="panel">
+        <div class="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p class="eyebrow">Public record</p>
+            <h2 class="section-heading mt-2">Cast your vote</h2>
+          </div>
+          <span class="status-chip self-start sm:self-auto">
             Hammer at {@vote_counts.hammer} · {@vote_counts.total} votes cast
           </span>
         </div>
 
-        <ul class="space-y-2">
-          <li :for={p <- living(@game.players)} class="flex items-center justify-between">
-            <span class="text-[color:var(--text)]">
-              {user_name(p.user)}
-              <span class="text-[color:var(--text-muted)]">
-                — {Map.get(@vote_counts.tallies, p.id, 0)}
+        <ul class="divide-y divide-[color:var(--border)]">
+          <li
+            :for={p <- living(@game.players)}
+            class="flex min-h-16 items-center justify-between gap-3 py-2"
+          >
+            <span class="flex min-w-0 items-center gap-3 text-[color:var(--text)]">
+              <span class="phase-icon size-9 shrink-0" aria-hidden="true">
+                <.icon name="hero-user" class="size-4" />
+              </span>
+              <span class="min-w-0">
+                <span class="block truncate font-semibold">{user_name(p.user)}</span>
+                <span class="mono text-xs text-[color:var(--text-muted)]">
+                  {Map.get(@vote_counts.tallies, p.id, 0)} votes
+                </span>
               </span>
             </span>
             <button
               :if={can_vote?(assigns)}
+              type="button"
               phx-click="cast_vote"
               phx-value-target={p.id}
               class={if @my_vote == p.id, do: btn_primary(), else: btn_secondary()}
+              aria-pressed={@my_vote == p.id}
+              phx-disable-with="Voting…"
             >
+              <.icon name="hero-hand-raised" class="size-4" />
               {if @my_vote == p.id, do: "Voted", else: "Vote"}
             </button>
           </li>
@@ -461,21 +532,25 @@ defmodule MafiaWeb.MafiaRoomLive do
 
         <div
           :if={can_vote?(assigns)}
-          class="flex gap-2 mt-3 pt-3 border-t border-[color:var(--border)]"
+          class="mt-3 flex flex-wrap gap-2 border-t border-[color:var(--border)] pt-4"
         >
           <button
+            type="button"
             phx-click="cast_vote"
             phx-value-target="no_lynch"
             class={if @my_vote == :no_lynch, do: btn_primary(), else: btn_secondary()}
+            aria-pressed={@my_vote == :no_lynch}
           >
             No lynch ({Map.get(@vote_counts.tallies, :no_lynch, 0)})
           </button>
-          <button :if={@my_vote} phx-click="retract_vote" class={btn_secondary()}>Unvote</button>
+          <button :if={@my_vote} type="button" phx-click="retract_vote" class={btn_secondary()}>
+            Unvote
+          </button>
         </div>
-        <p :if={!can_vote?(assigns)} class="text-sm text-[color:var(--text-muted)]">
+        <p :if={!can_vote?(assigns)} class="mt-3 text-sm text-[color:var(--text-muted)]">
           {if @my_player, do: "You are out of the game.", else: "Spectators can't vote."}
         </p>
-      </div>
+      </section>
 
       <.host_panel :if={@is_host} game={@game} night_actions={@night_actions} />
     </div>
@@ -491,25 +566,38 @@ defmodule MafiaWeb.MafiaRoomLive do
 
       <div
         :if={@my_player && @my_player.is_alive}
-        class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4"
+        class="panel"
       >
-        <h2 class="font-semibold text-[color:var(--text)] mb-2">Submit a night action</h2>
-        <p class="text-xs text-[color:var(--text-muted)] mb-3">
+        <p class="eyebrow">Private submission</p>
+        <h2 class="section-heading mt-2">Submit a night action</h2>
+        <p class="mb-4 mt-1 text-sm leading-6 text-[color:var(--text-muted)]">
           If your role acts at night, submit it here. The moderator resolves it.
         </p>
-        <form phx-submit="submit_night_action" class="flex flex-col sm:flex-row gap-2">
-          <input
-            type="text"
-            name="action_kind"
-            placeholder="Action (e.g. investigate)"
-            required
-            class={input_class()}
-          />
-          <select name="target" class={input_class()}>
-            <option value="none">No target</option>
-            <option :for={p <- living(@game.players)} value={p.id}>{user_name(p.user)}</option>
-          </select>
-          <button type="submit" class={btn_primary()}>Submit</button>
+        <form phx-submit="submit_night_action" class="grid gap-3 sm:grid-cols-2">
+          <label>
+            <span class="mb-1.5 block text-sm font-semibold">Action</span>
+            <input
+              type="text"
+              name="action_kind"
+              placeholder="For example, investigate"
+              required
+              class={input_class()}
+            />
+          </label>
+          <label>
+            <span class="mb-1.5 block text-sm font-semibold">Target</span>
+            <select name="target" class={input_class()}>
+              <option value="none">No target</option>
+              <option :for={p <- living(@game.players)} value={p.id}>{user_name(p.user)}</option>
+            </select>
+          </label>
+          <button
+            type="submit"
+            class={[btn_primary(), "sm:col-span-2"]}
+            phx-disable-with="Submitting…"
+          >
+            <.icon name="hero-paper-airplane" class="size-4" /> Submit privately
+          </button>
         </form>
       </div>
 
@@ -522,17 +610,18 @@ defmodule MafiaWeb.MafiaRoomLive do
 
   defp render_body(%{game: %{status: :finished}} = assigns) do
     ~H"""
-    <div class="rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-1)] p-4">
-      <h2 class="font-semibold text-[color:var(--text)] mb-3">Final roles</h2>
+    <section class="panel">
+      <p class="eyebrow">The record is closed</p>
+      <h2 class="section-heading mb-3 mt-2">Final roles</h2>
       <ul class="divide-y divide-[color:var(--border)]">
-        <li :for={p <- @game.players} class="flex items-center justify-between py-2">
-          <span class="text-[color:var(--text)]">{user_name(p.user)}</span>
-          <span class="text-sm text-[color:var(--text-muted)]">
+        <li :for={p <- @game.players} class="flex min-h-14 items-center justify-between gap-4 py-2">
+          <span class="font-semibold text-[color:var(--text)]">{user_name(p.user)}</span>
+          <span class="text-right text-sm text-[color:var(--text-muted)]">
             {p.role_name || "—"} ({p.alignment}){if !p.is_alive, do: " · dead"}
           </span>
         </li>
       </ul>
-    </div>
+    </section>
     """
   end
 
@@ -543,22 +632,22 @@ defmodule MafiaWeb.MafiaRoomLive do
 
   defp thread_links(assigns) do
     ~H"""
-    <div class="flex flex-wrap gap-2">
+    <nav class="flex flex-wrap gap-2" aria-label="Game conversations">
       <.link
         :if={@game.day_thread_conversation_id}
         navigate={~p"/messages/#{@game.day_thread_conversation_id}"}
         class={btn_secondary()}
       >
-        Open Town Square
+        <.icon name="hero-chat-bubble-oval-left-ellipsis" class="size-4" /> Town Square
       </.link>
       <.link
         :if={@my_player && @my_player.alignment == :mafia && @game.mafia_chat_conversation_id}
         navigate={~p"/messages/#{@game.mafia_chat_conversation_id}"}
         class={btn_secondary()}
       >
-        Open Mafia chat
+        <.icon name="hero-eye-slash" class="size-4" /> Mafia chat
       </.link>
-    </div>
+    </nav>
     """
   end
 
@@ -567,57 +656,111 @@ defmodule MafiaWeb.MafiaRoomLive do
 
   defp host_panel(assigns) do
     ~H"""
-    <div class="rounded-lg border border-amber-500/40 bg-[color:var(--surface-1)] p-4 space-y-4">
-      <h2 class="font-semibold text-amber-400">Moderator controls</h2>
+    <section class="panel moderator-panel space-y-5">
+      <div class="flex items-center gap-3">
+        <span class="phase-icon shrink-0 border-[color:rgba(211,170,98,0.34)] text-[color:var(--candle)]">
+          <.icon name="hero-key" class="size-5" />
+        </span>
+        <div>
+          <p class="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-[color:var(--candle)]">
+            Private docket
+          </p>
+          <h2 class="section-heading">Moderator controls</h2>
+        </div>
+      </div>
 
       <div :if={@game.status == :night}>
-        <h3 class="text-sm font-medium text-[color:var(--text)] mb-2">Night actions submitted</h3>
+        <h3 class="mb-2 text-sm font-semibold text-[color:var(--text)]">Night actions submitted</h3>
         <p :if={@night_actions == []} class="text-sm text-[color:var(--text-muted)]">None yet.</p>
         <ul class="space-y-2">
-          <li :for={a <- @night_actions} class="rounded-md border border-[color:var(--border)] p-2">
+          <li
+            :for={a <- @night_actions}
+            class="rounded-md border border-[color:var(--border)] bg-black/10 p-3"
+          >
             <div class="text-sm text-[color:var(--text)]">
               {user_name(if match?(%{user: _}, a.actor_player), do: a.actor_player.user)}:
               <b>{a.action_kind}</b>
               {if match?(%{user: _}, a.target_player), do: "→ #{user_name(a.target_player.user)}"}
               {if a.resolved, do: "· resolved"}
             </div>
-            <form :if={!a.resolved} phx-submit="resolve_night_action" class="flex gap-2 mt-1">
+            <form
+              :if={!a.resolved}
+              phx-submit="resolve_night_action"
+              class="mt-3 flex flex-col gap-2 sm:flex-row"
+            >
               <input type="hidden" name="action_id" value={a.id} />
-              <input type="text" name="result" placeholder="Result / outcome" class={input_class()} />
-              <button type="submit" class={btn_secondary()}>Record</button>
+              <label for={"action-result-#{a.id}"} class="sr-only">Result or outcome</label>
+              <input
+                id={"action-result-#{a.id}"}
+                type="text"
+                name="result"
+                placeholder="Result or outcome"
+                class={[input_class(), "min-w-0 flex-1"]}
+              />
+              <button type="submit" class={btn_secondary()} phx-disable-with="Recording…">
+                Record
+              </button>
             </form>
           </li>
         </ul>
-        <button phx-click="open_next_day" class={[btn_primary(), "mt-3"]}>Open next day</button>
+        <button
+          type="button"
+          phx-click="open_next_day"
+          class={[btn_primary(), "mt-3"]}
+          phx-disable-with="Opening…"
+        >
+          <.icon name="hero-sun" class="size-4" /> Open next day
+        </button>
       </div>
 
-      <div>
-        <h3 class="text-sm font-medium text-[color:var(--text)] mb-2">Eliminate a player</h3>
-        <ul class="space-y-1">
-          <li :for={p <- living(@game.players)} class="flex items-center justify-between text-sm">
-            <span class="text-[color:var(--text)]">{user_name(p.user)} ({p.alignment})</span>
-            <span class="flex gap-2">
+      <div class="border-t border-[color:var(--border)] pt-4">
+        <h3 class="mb-2 text-sm font-semibold text-[color:var(--text)]">Eliminate a player</h3>
+        <ul class="divide-y divide-[color:var(--border)]">
+          <li
+            :for={p <- living(@game.players)}
+            class="flex min-h-14 flex-wrap items-center justify-between gap-2 py-2 text-sm"
+          >
+            <span class="text-[color:var(--text)]">
+              {user_name(p.user)} <span class="text-[color:var(--text-muted)]">({p.alignment})</span>
+            </span>
+            <span class="flex flex-wrap gap-1">
               <button
+                type="button"
                 phx-click="eliminate"
                 phx-value-player_id={p.id}
                 phx-value-reason="night"
-                class="text-[color:var(--text-muted)] hover:text-red-400"
+                class="btn btn-quiet text-xs hover:text-[color:var(--color-danger-text)]"
               >
-                night kill
+                Night kill
               </button>
               <button
+                type="button"
                 phx-click="eliminate"
                 phx-value-player_id={p.id}
                 phx-value-reason="modkill"
-                class="text-[color:var(--text-muted)] hover:text-red-400"
+                class="btn btn-quiet text-xs hover:text-[color:var(--color-danger-text)]"
               >
-                modkill
+                Modkill
               </button>
             </span>
           </li>
         </ul>
       </div>
-    </div>
+
+      <div class="flex flex-col gap-3 border-t border-[color:var(--border)] pt-4 sm:flex-row sm:items-center sm:justify-between">
+        <p class="text-xs leading-5 text-[color:var(--text-muted)]">
+          Deleting a game permanently removes its room and record.
+        </p>
+        <button
+          type="button"
+          phx-click="delete_game"
+          data-confirm="Delete this game permanently? This can't be undone."
+          class="btn btn-quiet shrink-0 text-xs hover:text-[color:var(--color-danger-text)]"
+        >
+          <.icon name="hero-trash" class="size-4" /> Delete game
+        </button>
+      </div>
+    </section>
     """
   end
 
@@ -627,14 +770,10 @@ defmodule MafiaWeb.MafiaRoomLive do
   defp can_vote?(_), do: false
 
   defp btn_primary,
-    do:
-      "rounded-md bg-[color:var(--color-primary)] px-3 py-1.5 text-sm font-medium text-[color:var(--color-on-primary)]"
+    do: "btn btn-primary text-sm"
 
   defp btn_secondary,
-    do:
-      "rounded-md border border-[color:var(--border)] px-3 py-1.5 text-sm text-[color:var(--text)] hover:bg-[color:var(--surface-2)]"
+    do: "btn btn-secondary text-sm"
 
-  defp input_class,
-    do:
-      "rounded-md border border-[color:var(--border)] bg-[color:var(--surface-2)] px-3 py-2 text-sm text-[color:var(--text)]"
+  defp input_class, do: "input text-sm"
 end

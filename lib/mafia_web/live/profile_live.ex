@@ -52,15 +52,17 @@ defmodule MafiaWeb.ProfileLive do
   def render(%{live_action: :edit} = assigns) do
     ~H"""
     <section class="mx-auto max-w-2xl panel">
+      <p class="eyebrow mb-4">Your calling card</p>
       <.header>
         Your profile
-        <:subtitle>This lightweight profile belongs to the Nightjury community.</:subtitle>
+        <:subtitle>This lightweight profile belongs to the Night Jury community.</:subtitle>
       </.header>
 
       <div class="mb-6 flex items-center gap-4">
         <.avatar user={@profile_user} />
         <div>
           <p class="text-lg font-semibold">{@profile_user.username}</p>
+
           <.link navigate={~p"/users/#{@profile_user.username}"} class="text-sm">
             View public profile
           </.link>
@@ -80,16 +82,20 @@ defmodule MafiaWeb.ProfileLive do
   def render(assigns) do
     ~H"""
     <section class="mx-auto max-w-2xl panel">
+      <p class="eyebrow mb-5">Night Jury member</p>
       <div class="flex items-start gap-5">
         <.avatar user={@profile_user} />
         <div class="min-w-0">
           <h1 class="text-2xl font-semibold">{@profile_user.username}</h1>
+
           <p :if={@profile_user.tagline} class="mt-1 text-[color:var(--text-muted)]">
             {@profile_user.tagline}
           </p>
+
           <p :if={@profile_user.bio} class="mt-5 whitespace-pre-wrap leading-7">
             {@profile_user.bio}
           </p>
+
           <p :if={!@profile_user.bio} class="mt-5 text-[color:var(--text-muted)]">
             No bio yet.
           </p>
@@ -110,8 +116,7 @@ defmodule MafiaWeb.ProfileLive do
         alt=""
         class="size-full object-cover"
         referrerpolicy="no-referrer"
-      />
-      <span :if={!@user.avatar_url}>{@user.username |> String.first() |> String.upcase()}</span>
+      /> <span :if={!@user.avatar_url}>{@user.username |> String.first() |> String.upcase()}</span>
     </div>
     """
   end

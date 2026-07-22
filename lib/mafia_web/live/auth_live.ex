@@ -20,10 +20,11 @@ defmodule MafiaWeb.AuthLive do
   def render(%{live_action: :register} = assigns) do
     ~H"""
     <section class="mx-auto max-w-md panel">
+      <p class="eyebrow mb-4">Enter the chamber</p>
       <.header>
-        Create a Nightjury account
+        Create a Night Jury account
         <:subtitle>
-          Existing ConquestK accounts are copied during cutover—use sign in if you already have one.
+          New to Night Jury? Choose a name the table will recognize.
         </:subtitle>
       </.header>
 
@@ -47,7 +48,13 @@ defmodule MafiaWeb.AuthLive do
           minlength="12"
           required
         />
-        <.button variant="primary" class="btn btn-primary w-full">Register</.button>
+        <.button
+          variant="primary"
+          class="btn btn-primary w-full"
+          phx-disable-with="Creating account…"
+        >
+          Register
+        </.button>
       </form>
 
       <p class="mt-5 text-center text-sm text-[color:var(--text-muted)]">
@@ -60,10 +67,11 @@ defmodule MafiaWeb.AuthLive do
   def render(assigns) do
     ~H"""
     <section class="mx-auto max-w-md panel">
+      <p class="eyebrow mb-4">Return to the table</p>
       <.header>
         Sign in
         <:subtitle>
-          Your copied ConquestK password works here; browser sessions do not transfer.
+          Use your existing username or email and password. Browser sessions do not transfer.
         </:subtitle>
       </.header>
 
@@ -82,7 +90,13 @@ defmodule MafiaWeb.AuthLive do
           autocomplete="current-password"
           required
         />
-        <.button variant="primary" class="btn btn-primary w-full">Sign in</.button>
+        <.button
+          variant="primary"
+          class="btn btn-primary w-full"
+          phx-disable-with="Signing in…"
+        >
+          Sign in
+        </.button>
       </form>
 
       <p class="mt-5 text-center text-sm text-[color:var(--text-muted)]">
