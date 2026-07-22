@@ -51,7 +51,7 @@ defmodule MafiaWeb.UserAuth do
            Phoenix.LiveView.put_flash(
              socket,
              :error,
-             "Mafia is read-only while the data move is being verified."
+             "Nightjury is read-only while the data move is being verified."
            )}
         end
       end)

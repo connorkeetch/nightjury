@@ -21,7 +21,7 @@ defmodule MafiaWeb.AuthLive do
     ~H"""
     <section class="mx-auto max-w-md panel">
       <.header>
-        Create a Mafia account
+        Create a Nightjury account
         <:subtitle>
           Existing ConquestK accounts are copied during cutover—use sign in if you already have one.
         </:subtitle>
