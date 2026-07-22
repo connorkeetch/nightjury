@@ -11,6 +11,9 @@ defmodule MafiaWeb.SiteSmokeTest do
     assert html =~ "play-by-post game of hidden roles"
     assert has_element?(view, "a[href='/users/log-in']", "Log in")
     refute has_element?(view, "#mafia-create-form")
+
+    {:ok, _login, login_html} = live(conn, ~p"/users/log-in")
+    assert login_html =~ "Username or email"
   end
 
   test "copied user can open their profile and host from the lobby", %{conn: conn} do
