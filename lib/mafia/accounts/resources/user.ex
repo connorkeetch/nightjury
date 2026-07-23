@@ -57,6 +57,12 @@ defmodule Mafia.Accounts.Resources.User do
       constraints(max_length: 500, match: ~r/^https?:\/\//)
     end
 
+    attribute :signature, :string do
+      public?(true)
+      allow_nil?(true)
+      constraints(max_length: 500)
+    end
+
     attribute :deleted_at, :utc_datetime_usec do
       allow_nil?(true)
     end
@@ -80,7 +86,7 @@ defmodule Mafia.Accounts.Resources.User do
 
     update :update_profile do
       primary?(true)
-      accept([:bio, :tagline, :avatar_url])
+      accept([:bio, :tagline, :avatar_url, :signature])
       require_atomic?(false)
     end
   end

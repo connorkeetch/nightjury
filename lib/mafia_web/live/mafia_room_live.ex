@@ -373,9 +373,21 @@ defmodule MafiaWeb.MafiaRoomLive do
           <h1 class="page-heading mt-2 truncate">{@game.title || "Untitled game"}</h1>
         </div>
 
-        <.link navigate={~p"/mafia"} class="btn btn-quiet self-start sm:self-auto">
-          <.icon name="hero-arrow-left" class="size-4" /> All games
-        </.link>
+        <div class="flex flex-wrap gap-2 self-start sm:self-auto">
+          <button
+            :if={@is_host}
+            id="delete-game"
+            type="button"
+            phx-click="delete_game"
+            data-confirm="Delete this game permanently? This can't be undone."
+            class="btn btn-quiet text-sm hover:text-[color:var(--color-danger-text)]"
+          >
+            <.icon name="hero-trash" class="size-4" /> Delete game
+          </button>
+          <.link navigate={~p"/mafia"} class="btn btn-quiet">
+            <.icon name="hero-arrow-left" class="size-4" /> All games
+          </.link>
+        </div>
       </header>
 
       <.game_nav
@@ -1220,21 +1232,6 @@ defmodule MafiaWeb.MafiaRoomLive do
           </button>
         </div>
       </form>
-
-      <div class="flex flex-col gap-3 border-t border-[color:var(--border)] pt-4 sm:flex-row sm:items-center sm:justify-between">
-        <p class="text-xs leading-5 text-[color:var(--text-muted)]">
-          Deleting a game permanently removes its room and record.
-        </p>
-
-        <button
-          type="button"
-          phx-click="delete_game"
-          data-confirm="Delete this game permanently? This can't be undone."
-          class="btn btn-quiet shrink-0 text-xs hover:text-[color:var(--color-danger-text)]"
-        >
-          <.icon name="hero-trash" class="size-4" /> Delete game
-        </button>
-      </div>
     </section>
     """
   end

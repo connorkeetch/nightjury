@@ -207,6 +207,31 @@ defmodule MafiaWeb.CoreComponents do
     """
   end
 
+  attr :user, :map, required: true
+  attr :class, :any, default: "size-20 text-2xl"
+
+  def user_avatar(assigns) do
+    ~H"""
+    <div class={[
+      "grid shrink-0 place-items-center overflow-hidden rounded-full border border-[color:var(--border)] bg-[color:var(--surface-2)] font-semibold",
+      @class
+    ]}>
+      <img
+        :if={@user.avatar_url}
+        src={@user.avatar_url}
+        alt=""
+        class="size-full object-cover"
+        referrerpolicy="no-referrer"
+        loading="lazy"
+        decoding="async"
+      />
+      <span :if={!@user.avatar_url}>
+        {@user.username |> String.first() |> String.upcase()}
+      </span>
+    </div>
+    """
+  end
+
   attr :name, :string, required: true
   attr :class, :any, default: "size-4"
 

@@ -55,6 +55,8 @@ defmodule MafiaWeb.Router do
   scope "/", MafiaWeb do
     pipe_through [:browser, :authenticated]
 
+    get "/messages/:message_id/image", MessageImageController, :show
+
     live_session :authenticated,
       on_mount: [
         {MafiaWeb.UserAuth, :require_authenticated_user},

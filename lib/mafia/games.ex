@@ -44,6 +44,33 @@ defmodule Mafia.Games do
     Phoenix.PubSub.broadcast(Mafia.PubSub, topic(game_id), message)
   end
 
+  defp refresh_lobby do
+    Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
+  end
+
+  defp game_chat_snapshot(game) do
+    {
+      Chat.list_game_conversations(game.id),
+      Enum.uniq([game.host_id | player_user_ids(game.id)])
+    }
+  end
+
+  defp refresh_game_chats(game, previous_snapshot \\ {[], []}) do
+    {previous_conversations, previous_user_ids} = previous_snapshot
+    {current_conversations, current_user_ids} = game_chat_snapshot(game)
+
+    conversations =
+      Enum.uniq_by(previous_conversations ++ current_conversations, & &1.id)
+
+    user_ids = Enum.uniq(previous_user_ids ++ current_user_ids)
+    publish_game_chat_refreshes(conversations, user_ids)
+  end
+
+  defp publish_game_chat_refreshes(conversations, user_ids) do
+    Enum.each(conversations, &Chat.refresh_conversation(&1.id))
+    Chat.refresh_user_conversations(user_ids)
+  end
+
   # ============================================================================
   # Game lifecycle
   # ============================================================================
@@ -80,7 +107,7 @@ defmodule Mafia.Games do
 
       case result do
         {:ok, game} ->
-          _ = Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
+          _ = refresh_lobby()
           {:ok, game}
 
         {:error, error} ->
@@ -98,6 +125,7 @@ defmodule Mafia.Games do
          :ok <- authorize_host(game, host_id),
          :ok <- ensure_revision(game, expected_revision) do
       normalized = GameRules.normalize(ruleset)
+      chat_snapshot = game_chat_snapshot(game)
 
       result =
         Repo.transaction(fn ->
@@ -126,6 +154,7 @@ defmodule Mafia.Games do
         {:ok, updated} ->
           schedule_phase_timer(updated)
           _ = broadcast(updated.id, {:rules_changed, updated.rules_revision})
+          _ = refresh_game_chats(updated, chat_snapshot)
           {:ok, updated}
 
         {:error, error} ->
@@ -191,39 +220,54 @@ defmodule Mafia.Games do
     |> Enum.filter(&(lobby_type(&1) == "open"))
   end
 
+  @doc "Games a user hosts or has a seat in, including started and finished games."
+  def list_user_games(user_id) do
+    hosted =
+      MafiaGame
+      |> Ash.Query.filter(host_id == ^user_id)
+      |> Ash.read!(authorize?: false)
+
+    joined =
+      MafiaPlayer
+      |> Ash.Query.filter(user_id == ^user_id)
+      |> Ash.Query.load(:mafia_game)
+      |> Ash.read!(authorize?: false)
+      |> Enum.map(& &1.mafia_game)
+
+    (hosted ++ joined)
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
+  end
+
   @doc """
-  Deletes a game (host only). Archives the reused chat conversations and purges
-  the game's children (which have no ON DELETE CASCADE) before destroying it.
-  Works at any stage; mainly used to clean up un-started lobbies.
+  Deletes a game (host only). Database cascades remove the game's child records,
+  then the reused chat conversations are archived. Works at any stage.
   """
   def delete_game(%MafiaGame{} = game, host_id) do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id) do
-      # Purge children first — votes/night-actions reference players, so they go
-      # before players, and players before the game.
-      _ =
-        for resource <- [MafiaNightAction, MafiaVote, MafiaPlayer] do
-          _ =
-            resource
-            |> Ash.Query.filter(mafia_game_id == ^game.id)
-            |> Ash.bulk_destroy!(:destroy, %{}, authorize?: false)
-        end
+      conversations = Chat.list_game_conversations(game.id)
+      user_ids = Enum.uniq([host_id | player_user_ids(game.id)])
 
-      # Only archive the chats and announce the deletion once the game is gone,
-      # so a failed destroy can't leave an archived-but-still-present game.
-      case Ash.destroy(game, authorize?: false) do
-        {:error, _} = err ->
-          err
+      result =
+        Repo.transaction(fn ->
+          with :ok <- archive_game_conversations(conversations, host_id),
+               :ok <- destroy_game(game) do
+            :ok
+          else
+            {:error, error} -> Repo.rollback(error)
+          end
+        end)
 
-        _ok ->
-          _ =
-            for conversation <- Chat.list_game_conversations(game.id) do
-              _ = Chat.archive_conversation(conversation.id, host_id)
-            end
-
+      case result do
+        {:ok, :ok} ->
           _ = broadcast(game.id, :game_deleted)
-          _ = Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
+          _ = refresh_lobby()
+          _ = publish_game_chat_refreshes(conversations, user_ids)
           :ok
+
+        {:error, error} ->
+          {:error, error}
       end
     end
   end
@@ -280,7 +324,10 @@ defmodule Mafia.Games do
           MafiaPlayer
           |> Ash.Changeset.for_create(:create, %{mafia_game_id: game.id, user_id: user_id})
           |> Ash.create(authorize?: false)
-          |> tap_ok(fn _ -> broadcast(game.id, :roster_changed) end)
+          |> tap_ok(fn _ ->
+            _ = broadcast(game.id, :roster_changed)
+            _ = refresh_lobby()
+          end)
         end
 
       {:error, _} = err ->
@@ -314,10 +361,12 @@ defmodule Mafia.Games do
     case Ash.destroy(player, authorize?: false) do
       :ok ->
         _ = broadcast(game.id, :roster_changed)
+        _ = refresh_lobby()
         :ok
 
       {:ok, _} ->
         _ = broadcast(game.id, :roster_changed)
+        _ = refresh_lobby()
         :ok
 
       other ->
@@ -359,6 +408,8 @@ defmodule Mafia.Games do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
          {:ok, normalized} <- normalize_player_attrs(attrs) do
+      chat_snapshot = game_chat_snapshot(game)
+
       result =
         Repo.transaction(fn ->
           current = get_game!(game.id)
@@ -382,6 +433,7 @@ defmodule Mafia.Games do
       case result do
         {:ok, updated} ->
           _ = broadcast(game.id, :roster_changed)
+          _ = refresh_game_chats(get_game!(game.id), chat_snapshot)
           {:ok, updated}
 
         {:error, error} ->
@@ -698,6 +750,8 @@ defmodule Mafia.Games do
           post_system(started, "Day 1 begins. Discuss, and vote to lynch.")
           schedule_phase_timer(started)
           _ = broadcast(started.id, {:phase_changed, started})
+          _ = refresh_lobby()
+          _ = refresh_game_chats(started)
 
           notify_phase(
             started,
@@ -724,6 +778,8 @@ defmodule Mafia.Games do
   """
   def resolve_day(%MafiaGame{status: :day} = game) do
     with :ok <- WriteGate.ensure_enabled() do
+      chat_snapshot = game_chat_snapshot(game)
+
       result =
         Repo.transaction(fn ->
           with :ok <- lock_game_for_update(game.id) do
@@ -744,7 +800,7 @@ defmodule Mafia.Games do
 
       case result do
         {:ok, resolved} ->
-          publish_resolved_day(resolved)
+          publish_resolved_day(resolved, chat_snapshot)
           {:ok, resolved}
 
         {:error, reason} ->
@@ -765,12 +821,10 @@ defmodule Mafia.Games do
     end
   end
 
-  defp publish_resolved_day(game) do
+  defp publish_resolved_day(game, chat_snapshot) do
     _ = broadcast(game.id, {:phase_changed, game})
-
-    game.id
-    |> Chat.list_game_conversations()
-    |> Enum.each(&Chat.refresh_conversation(&1.id))
+    _ = refresh_lobby()
+    _ = refresh_game_chats(game, chat_snapshot)
 
     _ =
       game.id
@@ -809,6 +863,7 @@ defmodule Mafia.Games do
   def open_next_day(%MafiaGame{status: :night} = game, host_id) do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
+         chat_snapshot = game_chat_snapshot(game),
          {:ok, game} <-
            update_phase(game, false, %{
              status: :day,
@@ -818,6 +873,8 @@ defmodule Mafia.Games do
       post_system(game, "Dawn breaks on Day #{day_number(game)}.")
       schedule_phase_timer(game)
       _ = broadcast(game.id, {:phase_changed, game})
+      _ = refresh_lobby()
+      _ = refresh_game_chats(game, chat_snapshot)
       notify_phase(game, "Mafia — Day #{day_number(game)}", "Dawn breaks. The day phase is open.")
       {:ok, game}
     end
@@ -889,11 +946,22 @@ defmodule Mafia.Games do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
          {:ok, player} <- fetch_player_by_id(game.id, player_id),
+         chat_snapshot = game_chat_snapshot(game),
          :ok <- do_eliminate(game, player, reason) do
-      case maybe_finish(get_game!(game.id)) do
-        {:finished, finished} -> {:ok, finished}
-        {:continue, game} -> {:ok, game}
-        {:error, _reason} = error -> error
+      result =
+        case maybe_finish(get_game!(game.id)) do
+          {:finished, finished} -> {:ok, finished}
+          {:continue, game} -> {:ok, game}
+          {:error, _reason} = error -> error
+        end
+
+      case result do
+        {:ok, resolved} ->
+          _ = refresh_game_chats(resolved, chat_snapshot)
+          result
+
+        {:error, _reason} = error ->
+          error
       end
     end
   end
@@ -1003,6 +1071,7 @@ defmodule Mafia.Games do
       faction_name = GameRules.faction_name(game.ruleset, faction) || faction
       post_system(game, "Game over — the #{faction_name} win.")
       _ = broadcast(game.id, {:phase_changed, game})
+      _ = refresh_lobby()
       notify_phase(game, "Mafia — game over", "The #{faction_name} win #{game_label(game)}.")
       {:ok, game}
     end
@@ -1014,8 +1083,16 @@ defmodule Mafia.Games do
 
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
-         :ok <- if(faction == "", do: {:error, :winner_required}, else: :ok) do
-      do_finish_game(game, faction)
+         :ok <- if(faction == "", do: {:error, :winner_required}, else: :ok),
+         chat_snapshot = game_chat_snapshot(game) do
+      case do_finish_game(game, faction) do
+        {:ok, finished} = result ->
+          _ = refresh_game_chats(finished, chat_snapshot)
+          result
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 
@@ -1176,6 +1253,23 @@ defmodule Mafia.Games do
   # ============================================================================
   # Internal guards / helpers
   # ============================================================================
+
+  defp archive_game_conversations(conversations, host_id) do
+    Enum.reduce_while(conversations, :ok, fn conversation, :ok ->
+      case Chat.archive_conversation(conversation.id, host_id) do
+        {:ok, _archived} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp destroy_game(game) do
+    case Ash.destroy(game, authorize?: false) do
+      :ok -> :ok
+      {:ok, _game} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp ensure_players_loaded(%MafiaGame{players: %Ash.NotLoaded{}} = game),
     do: Ash.load!(game, :players, authorize?: false)

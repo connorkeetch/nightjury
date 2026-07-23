@@ -1,8 +1,67 @@
 defmodule Mafia.ChatTest do
   use Mafia.DataCase, async: true
 
-  alias Mafia.Chat
-  alias Mafia.Fixtures
+  alias Mafia.{Chat, Fixtures, Games}
+
+  @png Base.decode64!(
+         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+       )
+
+  test "username groups are listed for members while forums stay out of messages" do
+    creator = Fixtures.user_fixture()
+    member = Fixtures.user_fixture()
+
+    assert {:ok, group} =
+             Chat.create_group_conversation_by_usernames(creator.id, %{
+               "title" => "  Weekend crew  ",
+               "members" =>
+                 "#{member.username}, #{String.upcase(member.username)} #{creator.username}"
+             })
+
+    assert group.title == "Weekend crew"
+    assert Enum.any?(Chat.list_user_conversations(creator.id), &(&1.id == group.id))
+    assert Enum.any?(Chat.list_user_conversations(member.id), &(&1.id == group.id))
+
+    assert {:ok, forum} =
+             Chat.create_forum_topic(creator.id, %{
+               title: "Public post",
+               body: "This belongs in the forum."
+             })
+
+    refute Enum.any?(Chat.list_user_conversations(creator.id), &(&1.id == forum.id))
+  end
+
+  test "standalone group lifecycle is role-gated and unavailable to game chats" do
+    admin = Fixtures.user_fixture()
+    member = Fixtures.user_fixture()
+
+    assert {:ok, group} =
+             Chat.create_group_conversation_by_usernames(admin.id, %{
+               title: "Private crew",
+               members: member.username
+             })
+
+    assert {:error, :not_admin} = Chat.delete_group_conversation(group.id, member.id)
+    assert {:error, :admin_must_delete} = Chat.leave_group_conversation(group.id, admin.id)
+    assert :ok = Chat.leave_group_conversation(group.id, member.id)
+    assert {:error, :not_found} = Chat.get_conversation_for_user(group.id, member.id)
+    assert {:ok, _archived} = Chat.delete_group_conversation(group.id, admin.id)
+    refute Enum.any?(Chat.list_user_conversations(admin.id), &(&1.id == group.id))
+
+    assert {:ok, game} = Games.create_game(admin.id)
+
+    assert {:ok, game_chat} =
+             Chat.create_group_conversation(admin.id, [member.id],
+               kind: :game,
+               game_id: game.id
+             )
+
+    assert {:error, :managed_conversation} =
+             Chat.leave_group_conversation(game_chat.id, member.id)
+
+    assert {:error, :managed_conversation} =
+             Chat.delete_group_conversation(game_chat.id, admin.id)
+  end
 
   test "members can chat and a shadow-muted member cannot add or remove reactions" do
     host = Fixtures.user_fixture()
@@ -26,6 +85,67 @@ defmodule Mafia.ChatTest do
 
     assert {:ok, [loaded]} = Chat.list_messages(conversation.id, player.id)
     assert Enum.any?(loaded.reactions, &(&1.id == reaction.id))
+  end
+
+  test "replies must reference a message in the same conversation" do
+    author = Fixtures.user_fixture()
+    reader = Fixtures.user_fixture()
+
+    assert {:ok, conversation} = Chat.create_group_conversation(author.id, [reader.id])
+    assert {:ok, other_conversation} = Chat.create_group_conversation(author.id, [reader.id])
+    assert {:ok, original} = Chat.send_message(conversation.id, author.id, "Original")
+    assert {:ok, foreign} = Chat.send_message(other_conversation.id, author.id, "Private")
+
+    assert {:ok, reply} =
+             Chat.send_message(conversation.id, reader.id, "Reply",
+               reply_to_message_id: original.id
+             )
+
+    assert reply.reply_to_message_id == original.id
+
+    assert {:error, :reply_not_found} =
+             Chat.send_message(conversation.id, reader.id, "Forged reply",
+               reply_to_message_id: foreign.id
+             )
+  end
+
+  test "image attachments validate type and size" do
+    assert {:ok, attachment} = Chat.prepare_image_attachment(@png, "image.png")
+    assert attachment["content_type"] == "image/png"
+    assert attachment["size"] == byte_size(@png)
+    assert {:error, :unsupported_image} = Chat.prepare_image_attachment("not an image", "x.txt")
+
+    assert {:error, :invalid_image} =
+             Chat.prepare_image_attachment(png_fixture(6_001, 1), "x.png")
+
+    assert {:error, :image_too_large} =
+             Chat.prepare_image_attachment(
+               :binary.copy(<<0>>, Chat.image_max_bytes() + 1),
+               "large.png"
+             )
+  end
+
+  test "an image-only message stores metadata and stays private to members" do
+    author = Fixtures.user_fixture()
+    member = Fixtures.user_fixture()
+    outsider = Fixtures.user_fixture()
+
+    assert {:ok, conversation} = Chat.create_group_conversation(author.id, [member.id])
+    assert {:ok, attachment} = Chat.prepare_image_attachment(@png, "evidence.png")
+
+    assert {:ok, message} =
+             Chat.send_message(conversation.id, author.id, "", attachments: [attachment])
+
+    assert message.body == ""
+    assert [metadata] = message.attachments
+    assert metadata["content_type"] == "image/png"
+    assert metadata["size"] == byte_size(@png)
+    refute Map.has_key?(metadata, "data")
+
+    assert {:ok, %{content_type: "image/png", data: @png}} =
+             Chat.get_message_image(message.id, member.id)
+
+    assert {:error, :not_found} = Chat.get_message_image(message.id, outsider.id)
   end
 
   test "archiving a conversation closes direct reads, posts, and reactions" do
@@ -135,6 +255,27 @@ defmodule Mafia.ChatTest do
              Chat.toggle_forum_reaction(private_message.id, outsider.id, "👍")
   end
 
+  test "direct chats can be hidden and reopen without creating duplicates" do
+    sender = Fixtures.user_fixture()
+    recipient = Fixtures.user_fixture()
+
+    assert {:ok, conversation} = Chat.start_direct_conversation(sender.id, recipient.id)
+    assert :ok = Chat.hide_direct_conversation(conversation.id, recipient.id)
+
+    refute Enum.any?(
+             Chat.list_user_conversations(recipient.id),
+             &(&1.id == conversation.id)
+           )
+
+    assert {:ok, reopened} = Chat.start_direct_conversation(recipient.id, sender.id)
+    assert reopened.id == conversation.id
+    assert Enum.any?(Chat.list_user_conversations(recipient.id), &(&1.id == conversation.id))
+
+    assert :ok = Chat.hide_direct_conversation(conversation.id, recipient.id)
+    assert {:ok, _message} = Chat.send_message(conversation.id, sender.id, "New evidence")
+    assert Enum.any?(Chat.list_user_conversations(recipient.id), &(&1.id == conversation.id))
+  end
+
   test "recent messages move a reused direct conversation to the top" do
     sender = Fixtures.user_fixture()
     first_recipient = Fixtures.user_fixture()
@@ -214,5 +355,18 @@ defmodule Mafia.ChatTest do
                title: String.duplicate("a", 161),
                body: "Opening"
              })
+  end
+
+  defp png_fixture(width, height) do
+    header = <<width::32, height::32, 8, 6, 0, 0, 0>>
+
+    <<0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A>> <>
+      png_chunk("IHDR", header) <>
+      png_chunk("IDAT", <<>>) <>
+      png_chunk("IEND", <<>>)
+  end
+
+  defp png_chunk(type, data) do
+    <<byte_size(data)::32, type::binary, data::binary, :erlang.crc32(type <> data)::32>>
   end
 end

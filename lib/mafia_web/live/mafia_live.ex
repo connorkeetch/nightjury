@@ -46,13 +46,42 @@ defmodule MafiaWeb.MafiaLive do
     end
   end
 
+  def handle_event("delete_game", %{"id" => id}, socket) do
+    with %{id: user_id} <- socket.assigns.current_user,
+         {:ok, game} <- Games.get_game(id),
+         :ok <- Games.delete_game(game, user_id) do
+      {:noreply, socket |> put_flash(:info, "Game deleted.") |> load_games()}
+    else
+      _ -> {:noreply, put_flash(socket, :error, "Could not delete that game.")}
+    end
+  end
+
+  def handle_event("leave_game", %{"id" => id}, socket) do
+    with %{id: user_id} <- socket.assigns.current_user,
+         {:ok, game} <- Games.get_game(id),
+         :ok <- Games.leave_game(game, user_id) do
+      {:noreply, socket |> put_flash(:info, "You left the game.") |> load_games()}
+    else
+      _ -> {:noreply, put_flash(socket, :error, "Could not leave that game.")}
+    end
+  end
+
   @impl true
   def handle_info(:games_changed, socket), do: {:noreply, load_games(socket)}
 
-  defp load_games(socket), do: assign(socket, :games, Games.list_open_games())
+  defp load_games(socket) do
+    user = socket.assigns.current_user
+
+    assign(socket,
+      games: Games.list_open_games(),
+      user_games: if(user, do: Games.list_user_games(user.id), else: [])
+    )
+  end
 
   defp blank_to_nil(s) when is_binary(s), do: if(String.trim(s) == "", do: nil, else: s)
   defp blank_to_nil(s), do: s
+
+  defp game_status(game), do: game.status |> to_string() |> String.capitalize()
 
   @impl true
   def render(assigns) do
@@ -78,6 +107,62 @@ defmodule MafiaWeb.MafiaLive do
         <div class="hero-seal" aria-hidden="true">
           <.icon name="hero-scale" class="size-14" />
         </div>
+      </section>
+
+      <section :if={@user_games != []} id="your-games" aria-labelledby="your-games-heading">
+        <div class="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <p class="eyebrow">Your table</p>
+            <h2 id="your-games-heading" class="section-heading mt-2">Your games</h2>
+          </div>
+          <span class="status-chip">{length(@user_games)} listed</span>
+        </div>
+
+        <ul class="grid gap-3 sm:grid-cols-2">
+          <li
+            :for={game <- @user_games}
+            id={"your-game-#{game.id}"}
+            class="panel flex items-center justify-between gap-4"
+          >
+            <div class="min-w-0">
+              <p class="truncate font-semibold text-[color:var(--text)]">
+                {game.title || "Untitled game"}
+              </p>
+              <p class="mt-1 text-xs text-[color:var(--text-muted)]">
+                {game_status(game)} · {if game.host_id == @current_user.id,
+                  do: "You moderate",
+                  else: "You play"}
+              </p>
+            </div>
+            <div class="flex shrink-0 flex-wrap justify-end gap-1">
+              <.link navigate={~p"/mafia/#{game.id}"} class="btn btn-secondary text-xs">
+                Open
+              </.link>
+              <button
+                :if={game.host_id == @current_user.id}
+                id={"delete-game-#{game.id}"}
+                type="button"
+                phx-click="delete_game"
+                phx-value-id={game.id}
+                data-confirm="Delete this game permanently? This can't be undone."
+                class="btn btn-quiet text-xs hover:text-[color:var(--color-danger-text)]"
+              >
+                Delete
+              </button>
+              <button
+                :if={game.host_id != @current_user.id && game.status == :setup}
+                id={"leave-game-#{game.id}"}
+                type="button"
+                phx-click="leave_game"
+                phx-value-id={game.id}
+                data-confirm="Leave this game?"
+                class="btn btn-quiet text-xs"
+              >
+                Leave
+              </button>
+            </div>
+          </li>
+        </ul>
       </section>
 
       <div class="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] lg:items-start">

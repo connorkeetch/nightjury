@@ -59,7 +59,7 @@ defmodule MafiaWeb.ProfileLive do
       </.header>
 
       <div class="mb-6 flex items-center gap-4">
-        <.avatar user={@profile_user} />
+        <.user_avatar user={@profile_user} />
         <div>
           <p class="text-lg font-semibold">{@profile_user.username}</p>
 
@@ -73,6 +73,13 @@ defmodule MafiaWeb.ProfileLive do
         <.input field={@form[:tagline]} label="Tagline" maxlength="255" />
         <.input field={@form[:bio]} type="textarea" label="Bio" rows="6" maxlength="500" />
         <.input field={@form[:avatar_url]} type="url" label="Avatar URL" />
+        <.input
+          field={@form[:signature]}
+          type="textarea"
+          label="Chat & forum signature"
+          rows="3"
+          maxlength="500"
+        />
         <.button variant="primary">Save profile</.button>
       </.form>
     </section>
@@ -84,7 +91,7 @@ defmodule MafiaWeb.ProfileLive do
     <section class="mx-auto max-w-2xl panel">
       <p class="eyebrow mb-5">Night Jury member</p>
       <div class="flex items-start gap-5">
-        <.avatar user={@profile_user} />
+        <.user_avatar user={@profile_user} />
         <div class="min-w-0">
           <h1 class="text-2xl font-semibold">{@profile_user.username}</h1>
 
@@ -105,27 +112,17 @@ defmodule MafiaWeb.ProfileLive do
     """
   end
 
-  attr :user, :map, required: true
-
-  defp avatar(assigns) do
-    ~H"""
-    <div class="grid size-20 shrink-0 place-items-center overflow-hidden rounded-full border border-[color:var(--border)] bg-[color:var(--surface-2)] text-2xl font-semibold">
-      <img
-        :if={@user.avatar_url}
-        src={@user.avatar_url}
-        alt=""
-        class="size-full object-cover"
-        referrerpolicy="no-referrer"
-      /> <span :if={!@user.avatar_url}>{@user.username |> String.first() |> String.upcase()}</span>
-    </div>
-    """
-  end
-
   defp assign_form(socket, user) do
     assign(
       socket,
       :form,
-      to_form(%{"bio" => user.bio, "tagline" => user.tagline, "avatar_url" => user.avatar_url},
+      to_form(
+        %{
+          "bio" => user.bio,
+          "tagline" => user.tagline,
+          "avatar_url" => user.avatar_url,
+          "signature" => user.signature
+        },
         as: :profile
       )
     )
