@@ -12,6 +12,7 @@ defmodule MafiaWeb.ChatLive do
      |> assign(:conversation_id, id)
      |> assign(:message, "")
      |> assign(:reply_to_message_id, nil)
+     |> assign(:gif_url, "")
      |> allow_upload(:image,
        accept: ~w(.jpg .jpeg .png .webp),
        max_entries: 1,
@@ -23,25 +24,37 @@ defmodule MafiaWeb.ChatLive do
   @impl true
   def handle_event("send_message", %{"message" => attrs}, socket) do
     body = Map.get(attrs, "body", "")
+    gif_url = Map.get(attrs, "gif_url", "")
 
-    with {:ok, attachments} <- consume_image(socket),
+    with :ok <- validate_gif_url(gif_url),
+         {:ok, attachments} <- consume_image(socket),
          {:ok, _message} <-
            Chat.send_message(socket.assigns.conversation_id, socket.assigns.current_user.id, body,
              reply_to_message_id: socket.assigns.reply_to_message_id,
-             attachments: attachments
+             attachments: attachments,
+             gif_url: gif_url
            ) do
       {:noreply,
        socket
        |> assign(:message, "")
        |> assign(:reply_to_message_id, nil)
+       |> assign(:gif_url, "")
        |> refresh()}
     else
-      {:error, reason} -> {:noreply, put_flash(socket, :error, chat_error(reason))}
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:message, body)
+         |> assign(:gif_url, gif_url)
+         |> put_flash(:error, chat_error(reason))}
     end
   end
 
   def handle_event("validate_message", %{"message" => attrs}, socket) do
-    {:noreply, assign(socket, :message, Map.get(attrs, "body", ""))}
+    {:noreply,
+     socket
+     |> assign(:message, Map.get(attrs, "body", ""))
+     |> assign(:gif_url, Map.get(attrs, "gif_url", ""))}
   end
 
   def handle_event("quote_reply", %{"message-id" => message_id}, socket) do
@@ -99,6 +112,22 @@ defmodule MafiaWeb.ChatLive do
     end
   end
 
+  def handle_event("hide_conversation", _params, socket) do
+    case Chat.hide_direct_conversation(
+           socket.assigns.conversation_id,
+           socket.assigns.current_user.id
+         ) do
+      :ok ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Chat removed from your list.")
+         |> push_navigate(to: ~p"/messages")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, chat_error(reason))}
+    end
+  end
+
   @impl true
   def handle_info(:messages_changed, socket), do: {:noreply, refresh(socket)}
 
@@ -111,18 +140,27 @@ defmodule MafiaWeb.ChatLive do
           <.link navigate={~p"/messages"} class="btn btn-quiet" aria-label="Back to messages">
             <.icon name="hero-arrow-left" class="size-4" />
           </.link>
+
           <div class="min-w-0">
             <p class="eyebrow">Conversation</p>
+
             <h1 class="section-heading mt-1 truncate">{@conversation.title || "Mafia chat"}</h1>
+
             <p :if={@conversation.is_read_only} class="text-sm text-[color:var(--warning-text)]">
               This thread is locked until the next day phase.
             </p>
           </div>
         </div>
 
-        <div :if={standalone_group?(@conversation)} class="flex shrink-0 flex-wrap gap-2">
+        <div
+          :if={standalone_group?(@conversation) or direct?(@conversation)}
+          class="flex shrink-0 flex-wrap gap-2"
+        >
           <button
-            :if={!conversation_admin?(@conversation, @current_user.id)}
+            :if={
+              standalone_group?(@conversation) and
+                !conversation_admin?(@conversation, @current_user.id)
+            }
             type="button"
             phx-click="leave_conversation"
             data-confirm="Leave this group chat? You won't be able to reopen it."
@@ -130,11 +168,25 @@ defmodule MafiaWeb.ChatLive do
           >
             <.icon name="hero-arrow-right-start-on-rectangle" class="size-4" /> Leave group
           </button>
+
           <button
-            :if={conversation_admin?(@conversation, @current_user.id)}
+            :if={
+              standalone_group?(@conversation) and
+                conversation_admin?(@conversation, @current_user.id)
+            }
             type="button"
             phx-click="delete_conversation"
             data-confirm="Remove this chat from everyone's list? Members won't be able to reopen it."
+            class="btn btn-quiet text-sm hover:text-[color:var(--color-danger-text)]"
+          >
+            <.icon name="hero-trash" class="size-4" /> Delete chat
+          </button>
+
+          <button
+            :if={direct?(@conversation)}
+            type="button"
+            phx-click="hide_conversation"
+            data-confirm="Remove this private chat from your list? It will return if either person starts it again."
             class="btn btn-quiet text-sm hover:text-[color:var(--color-danger-text)]"
           >
             <.icon name="hero-trash" class="size-4" /> Delete chat
@@ -148,7 +200,9 @@ defmodule MafiaWeb.ChatLive do
             <span class="empty-state-icon" aria-hidden="true">
               <.icon name="hero-chat-bubble-bottom-center-text" class="size-6" />
             </span>
+
             <p class="font-semibold text-[color:var(--text)]">The floor is open.</p>
+
             <p class="mt-1 text-sm">No messages yet.</p>
           </div>
         </div>
@@ -168,6 +222,7 @@ defmodule MafiaWeb.ChatLive do
                 >
                   {message.user.username}
                 </.link>
+
                 <time
                   datetime={DateTime.to_iso8601(message.created_at)}
                   class="mono text-xs text-[color:var(--text-muted)]"
@@ -181,18 +236,17 @@ defmodule MafiaWeb.ChatLive do
                 class="mt-2 rounded-md border-l-2 border-[color:var(--border-strong)] bg-[color:var(--surface-2)] px-3 py-2 text-sm text-[color:var(--text-muted)]"
               >
                 <p class="font-medium text-[color:var(--text)]">{quoted.user.username}</p>
+
                 <p class="line-clamp-2 whitespace-pre-wrap">{quoted_body(quoted)}</p>
               </blockquote>
 
-              <p
-                :if={message.body != ""}
+              <.message_body
+                message={message}
                 class={[
-                  "mt-1 whitespace-pre-wrap leading-6",
+                  "mt-1",
                   system_message?(message) && "italic text-[color:var(--text-muted)]"
                 ]}
-              >
-                {message.body}
-              </p>
+              />
 
               <img
                 :if={attachment = image_attachment(message)}
@@ -202,7 +256,6 @@ defmodule MafiaWeb.ChatLive do
                 loading="lazy"
                 decoding="async"
               />
-
               <p
                 :if={message.user.signature && !system_message?(message)}
                 class="mt-3 whitespace-pre-wrap border-t border-[color:var(--border)] pt-2 text-xs text-[color:var(--text-muted)]"
@@ -211,21 +264,7 @@ defmodule MafiaWeb.ChatLive do
               </p>
 
               <div class="mt-2 flex flex-wrap gap-1">
-                <button
-                  :for={emoji <- Chat.allowed_reactions()}
-                  type="button"
-                  phx-click="react"
-                  phx-value-message-id={message.id}
-                  phx-value-emoji={emoji}
-                  class={[
-                    "min-h-9 rounded-full border border-[color:var(--border)] px-2 text-xs",
-                    reacted?(message, @current_user.id, emoji) && "bg-[color:var(--surface-2)]"
-                  ]}
-                  aria-label={"React with #{emoji}; #{reaction_count(message, emoji)} reactions"}
-                  aria-pressed={reacted?(message, @current_user.id, emoji)}
-                >
-                  {emoji} {reaction_count(message, emoji)}
-                </button>
+                <.message_reactions message={message} current_user={@current_user} />
                 <button
                   type="button"
                   phx-click="quote_reply"
@@ -246,6 +285,7 @@ defmodule MafiaWeb.ChatLive do
           to_form(
             %{
               "body" => @message,
+              "gif_url" => @gif_url,
               "reply_to_message_id" => @reply_to_message_id || ""
             },
             as: :message
@@ -254,7 +294,7 @@ defmodule MafiaWeb.ChatLive do
         id="message-form"
         phx-change="validate_message"
         phx-submit="send_message"
-        class="space-y-2"
+        class="space-y-3"
       >
         <div
           :if={quoted = Map.get(@message_lookup, @reply_to_message_id)}
@@ -263,10 +303,12 @@ defmodule MafiaWeb.ChatLive do
         >
           <div class="min-w-0">
             <p class="font-medium">Replying to {quoted.user.username}</p>
+
             <p class="line-clamp-2 whitespace-pre-wrap text-[color:var(--text-muted)]">
               {quoted_body(quoted)}
             </p>
           </div>
+
           <button
             type="button"
             phx-click="cancel_reply"
@@ -284,9 +326,11 @@ defmodule MafiaWeb.ChatLive do
           <.live_img_preview entry={entry} class="size-16 rounded-md object-cover" />
           <div class="min-w-0 flex-1">
             <p class="truncate text-sm">{entry.client_name}</p>
+
             <progress value={entry.progress} max="100" class="h-1 w-full">
               {entry.progress}%
             </progress>
+
             <p
               :for={error <- upload_errors(@uploads.image, entry)}
               class="text-xs text-[color:var(--color-danger-text)]"
@@ -294,6 +338,7 @@ defmodule MafiaWeb.ChatLive do
               {upload_error(error)}
             </p>
           </div>
+
           <button
             type="button"
             phx-click="cancel_upload"
@@ -312,30 +357,31 @@ defmodule MafiaWeb.ChatLive do
           {upload_error(error)}
         </p>
 
-        <div class="flex items-end gap-2">
-          <div class="min-w-0 flex-1">
-            <input
-              type="hidden"
-              name="message[reply_to_message_id]"
-              value={@reply_to_message_id || ""}
-            />
-            <.input
-              id="message-body"
-              name="message[body]"
-              value={@message}
-              aria-label="Message"
-              placeholder={
-                if @conversation.is_read_only, do: "Thread is read-only", else: "Write a message…"
-              }
-              disabled={@conversation.is_read_only}
-            />
-          </div>
+        <input
+          type="hidden"
+          name="message[reply_to_message_id]"
+          value={@reply_to_message_id || ""}
+        />
+        <.rich_text_input
+          id="message-body"
+          name="message[body]"
+          value={@message}
+          label="Message"
+          rows={4}
+          maxlength="10000"
+          gif_name="message[gif_url]"
+          gif_value={@gif_url}
+          placeholder={
+            if @conversation.is_read_only, do: "Thread is read-only", else: "Write a message…"
+          }
+          disabled={@conversation.is_read_only}
+        />
+        <div class="flex flex-wrap items-center justify-between gap-2">
           <label class={[
             "btn btn-secondary cursor-pointer",
             @conversation.is_read_only && "pointer-events-none opacity-50"
           ]}>
-            <.icon name="hero-photo" class="size-4" />
-            <span>Image</span>
+            <.icon name="hero-photo" class="size-4" /> <span>Image</span>
             <.live_file_input
               upload={@uploads.image}
               class="sr-only"
@@ -377,11 +423,6 @@ defmodule MafiaWeb.ChatLive do
     end
   end
 
-  defp reacted?(message, user_id, emoji),
-    do: Enum.any?(message.reactions, &(&1.user_id == user_id and &1.emoji == emoji))
-
-  defp reaction_count(message, emoji), do: Enum.count(message.reactions, &(&1.emoji == emoji))
-
   defp consume_image(socket) do
     upload = socket.assigns.uploads.image
 
@@ -409,11 +450,34 @@ defmodule MafiaWeb.ChatLive do
     end
   end
 
-  defp image_attachment(%{attachments: [attachment | _]}), do: attachment
+  defp image_attachment(%{attachments: attachments}) when is_list(attachments),
+    do: Enum.find(attachments, &image_attachment?/1)
+
   defp image_attachment(_message), do: nil
 
-  defp quoted_body(%{body: ""}), do: "Image attachment"
-  defp quoted_body(message), do: message.body
+  defp image_attachment?(attachment),
+    do:
+      attachment["type"] == "image" or
+        (is_binary(attachment["id"]) and is_binary(attachment["content_type"]))
+
+  defp quoted_body(%{body: body}) when is_binary(body) and body != "", do: body
+
+  defp quoted_body(%{attachments: attachments}) do
+    image? = Enum.any?(attachments, &image_attachment?/1)
+    gif? = Enum.any?(attachments, &(&1["type"] == "gif"))
+
+    cond do
+      image? and gif? -> "Image and GIF attachments"
+      image? -> "Image attachment"
+      gif? -> "GIF attachment"
+      true -> "Attachment"
+    end
+  end
+
+  defp validate_gif_url(url) when url in [nil, ""], do: :ok
+
+  defp validate_gif_url(url),
+    do: if(Chat.valid_gif_url?(url), do: :ok, else: {:error, :invalid_gif})
 
   defp system_message?(message), do: (message.json_metadata || %{})["system"] == true
 
@@ -427,12 +491,17 @@ defmodule MafiaWeb.ChatLive do
 
   defp standalone_group?(_conversation), do: false
 
+  defp direct?(%{kind: :direct}), do: true
+  defp direct?(_conversation), do: false
+
   defp conversation_admin?(conversation, user_id),
     do: Enum.any?(conversation.members, &(&1.user_id == user_id and &1.role == :admin))
 
   defp chat_error(:muted), do: "You cannot post or react after elimination."
   defp chat_error(:read_only), do: "This conversation is read-only."
-  defp chat_error(:empty_message), do: "Write a message or attach an image first."
+  defp chat_error(:empty_message), do: "Write a message or attach an image or GIF first."
+  defp chat_error(:message_too_long), do: "Keep messages under 10,000 characters."
+  defp chat_error(:invalid_gif), do: "Use a direct HTTPS URL ending in .gif."
   defp chat_error(:reply_not_found), do: "That message is no longer available."
   defp chat_error(:image_too_large), do: "Keep images under 2 MB."
   defp chat_error(:unsupported_image), do: "Choose a JPEG, PNG, or WebP image."

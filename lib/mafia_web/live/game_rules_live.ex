@@ -193,8 +193,11 @@ defmodule MafiaWeb.GameRulesLive do
           </div>
         </div>
         <dl class="mt-5 divide-y divide-[color:var(--border)] text-sm">
-          <.rule_row term="Availability" value={chat_policy_label(@rules["private_chat_policy"])} />
-          <.rule_row term="Faction rooms" value={faction_list(@rules["private_factions"])} />
+          <.rule_row
+            term="Player-created chats"
+            value={chat_policy_label(@rules["private_chat_policy"])}
+          />
+          <.rule_row term="Factions" value={faction_list(@rules["factions"])} />
           <.rule_row term="Chats per player" value={to_string(@rules["night_conversation_cap"])} />
           <.rule_row
             term="Players per chat"
@@ -390,8 +393,13 @@ defmodule MafiaWeb.GameRulesLive do
   defp chat_policy_label("night"), do: "Night phases only"
   defp chat_policy_label(_), do: "Always available"
 
-  defp faction_list([]), do: "No automatic faction rooms"
-  defp faction_list(factions), do: Enum.join(factions, ", ")
+  defp faction_list([]), do: "No factions configured"
+
+  defp faction_list(factions) do
+    Enum.map_join(factions, " · ", fn faction ->
+      "#{faction["name"]}: #{chat_policy_label(faction["chat_policy"])}"
+    end)
+  end
 
   defp yes_no(true), do: "Yes"
   defp yes_no(_), do: "No"

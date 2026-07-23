@@ -58,6 +58,7 @@ defmodule MafiaWeb do
       use Gettext, backend: MafiaWeb.Gettext
 
       import Phoenix.HTML
+      import MafiaWeb.ChatComponents
       import MafiaWeb.CoreComponents
 
       alias Phoenix.LiveView.JS

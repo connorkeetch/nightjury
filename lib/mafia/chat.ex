@@ -10,10 +10,13 @@ defmodule Mafia.Chat do
   @allowed_reactions ["👍", "👎", "😂", "❤️", "🤔", "🎉"]
   @send_rate_window :timer.seconds(10)
   @send_rate_limit 10
+  @global_send_rate_limit 20
   @reaction_rate_window :timer.seconds(10)
   @reaction_rate_limit 30
   @forum_topic_rate_window :timer.minutes(10)
   @forum_topic_rate_limit 5
+  @direct_start_rate_window :timer.minutes(10)
+  @direct_start_rate_limit 5
   @forum_title_max_length 160
   @group_create_rate_window :timer.minutes(10)
   @group_create_rate_limit 5
@@ -25,6 +28,8 @@ defmodule Mafia.Chat do
   @image_storage_quota_bytes 50_000_000
   @image_rate_window :timer.hours(1)
   @image_rate_limit 10
+  @message_format "simple_markup_v1"
+  @gif_url_max_length 2_048
 
   def allowed_reactions, do: @allowed_reactions
   def image_max_bytes, do: @image_max_bytes
@@ -32,11 +37,13 @@ defmodule Mafia.Chat do
   def create_forum_topic(creator_id, attrs) when is_map(attrs) do
     title = attrs |> value(:title) |> to_string() |> String.trim()
     body = attrs |> value(:body) |> to_string() |> String.trim()
+    gif_url = attrs |> value(:gif_url) |> to_string() |> String.trim()
 
     with :ok <- Mafia.WriteGate.ensure_enabled(),
          %{} <- Accounts.get_user(creator_id),
          :ok <- validate_topic_title(title),
-         :ok <- validate_body(body),
+         {:ok, attachments} <- gif_attachments(gif_url),
+         :ok <- validate_message(body, attachments),
          :ok <- rate_limit_forum_topic(creator_id) do
       result =
         Repo.transaction(fn ->
@@ -49,7 +56,16 @@ defmodule Mafia.Chat do
                  })
                  |> Ash.create(authorize?: false),
                :ok <- add_members(conversation.id, creator_id, []),
-               {:ok, _message} <- create_message(conversation.id, creator_id, body) do
+               {:ok, _message} <-
+                 create_message(
+                   conversation.id,
+                   creator_id,
+                   body,
+                   %{
+                     json_metadata: %{"format" => @message_format},
+                     attachments: attachments
+                   }
+                 ) do
             conversation
           else
             {:error, reason} -> Repo.rollback(reason)
@@ -116,7 +132,17 @@ defmodule Mafia.Chat do
     end
   end
 
-  def reply_to_forum_topic(conversation_id, user_id, body, opts \\ []) do
+  def reply_to_forum_topic(conversation_id, user_id, attrs) when is_map(attrs) do
+    reply_to_forum_topic(conversation_id, user_id, value(attrs, :body),
+      gif_url: value(attrs, :gif_url),
+      reply_to_message_id: value(attrs, :reply_to_message_id)
+    )
+  end
+
+  def reply_to_forum_topic(conversation_id, user_id, body),
+    do: reply_to_forum_topic(conversation_id, user_id, body, [])
+
+  def reply_to_forum_topic(conversation_id, user_id, body, opts) when is_list(opts) do
     with {:ok, _member} <- join_forum_topic(conversation_id, user_id) do
       send_message(conversation_id, user_id, body, opts)
     end
@@ -131,6 +157,37 @@ defmodule Mafia.Chat do
 
   def toggle_forum_reaction(_message_id, _user_id, _emoji),
     do: {:error, :unsupported_reaction}
+
+  def start_direct_conversation(creator_id, recipient_id)
+      when is_binary(creator_id) and is_binary(recipient_id) do
+    with :ok <- Mafia.WriteGate.ensure_enabled(),
+         %{} = creator <- Accounts.get_user(creator_id),
+         %{} = recipient <- Accounts.get_user(recipient_id),
+         false <- creator_id == recipient_id do
+      case direct_conversation_for(creator_id, recipient_id) do
+        %Conversation{} = conversation ->
+          with :ok <- unhide_member(conversation.id, creator_id) do
+            broadcast_user_conversations([creator_id])
+            {:ok, conversation}
+          end
+
+        nil ->
+          with :ok <- rate_limit_direct_start(creator_id) do
+            # ponytail: best-effort pair reuse; add a canonical pair key and unique index if concurrent duplicates occur.
+            create_group_conversation(creator_id, [recipient_id],
+              kind: :direct,
+              title: "#{creator.username} & #{recipient.username}"
+            )
+          end
+      end
+    else
+      nil -> {:error, :user_not_found}
+      true -> {:error, :self_conversation}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def start_direct_conversation(_creator_id, _recipient_id), do: {:error, :user_not_found}
 
   def create_group_conversation(creator_id, member_ids, opts \\ []) do
     with :ok <- Mafia.WriteGate.ensure_enabled(),
@@ -275,10 +332,12 @@ defmodule Mafia.Chat do
   def send_message(conversation_id, user_id, body, opts \\ []) do
     system? = Keyword.get(opts, :system, false)
     reply_to_message_id = normalize_reply_id(Keyword.get(opts, :reply_to_message_id))
-    attachments = Keyword.get(opts, :attachments, [])
+    uploaded_attachments = Keyword.get(opts, :attachments, [])
     body = body |> to_string() |> String.trim()
 
     with :ok <- Mafia.WriteGate.ensure_enabled(),
+         {:ok, gif_attachments} <- gif_attachments(Keyword.get(opts, :gif_url)),
+         attachments = uploaded_attachments ++ gif_attachments,
          {:ok, member} <- membership(conversation_id, user_id),
          :ok <- maybe_rate_limit_send(system?, conversation_id, user_id),
          {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
@@ -292,11 +351,14 @@ defmodule Mafia.Chat do
              user_id,
              body,
              %{
-               json_metadata: if(system?, do: %{"system" => true}, else: %{}),
+               json_metadata:
+                 if(system?, do: %{"system" => true}, else: %{"format" => @message_format}),
                reply_to_message_id: reply_to_message_id,
                attachments: attachments
              }
            ) do
+      _ = restore_direct_members(conversation)
+      _ = touch_conversation(conversation)
       broadcast(conversation_id)
       {:ok, message}
     end
@@ -307,6 +369,7 @@ defmodule Mafia.Chat do
          {:ok, content_type} <- validate_image(data) do
       {:ok,
        %{
+         "type" => "image",
          "id" => Ecto.UUID.generate(),
          "name" => safe_image_name(name),
          "content_type" => content_type,
@@ -327,7 +390,8 @@ defmodule Mafia.Chat do
          {:ok, conversation} <-
            Ash.get(Conversation, message.conversation_id, authorize?: false),
          :ok <- verify_can_read(conversation, user_id),
-         %{"id" => image_id} <- List.first(message.attachments || []),
+         %{"id" => image_id} <-
+           Enum.find(message.attachments || [], &(attachment_type(&1) == :image)),
          {:ok, %{rows: [[content_type, data]]}} <-
            Repo.query(
              "SELECT content_type, data FROM message_images WHERE id = $1::uuid AND message_id = $2::uuid",
@@ -349,6 +413,23 @@ defmodule Mafia.Chat do
            |> Ash.update(authorize?: false) do
       broadcast(conversation_id)
       {:ok, updated}
+    end
+  end
+
+  def rename_conversation(conversation_id, actor_id, title) do
+    title = title |> to_string() |> String.trim() |> String.slice(0, 200)
+
+    with :ok <- Mafia.WriteGate.ensure_enabled(),
+         {:ok, conversation} <- Ash.get(Conversation, conversation_id, authorize?: false),
+         :ok <- authorize_membership_sync(conversation, actor_id) do
+      if conversation.title == title do
+        {:ok, conversation}
+      else
+        conversation
+        |> Ash.Changeset.for_update(:update, %{title: title})
+        |> Ash.update(authorize?: false)
+        |> tap(fn result -> if match?({:ok, _}, result), do: broadcast(conversation_id) end)
+      end
     end
   end
 
@@ -410,6 +491,24 @@ defmodule Mafia.Chat do
     end
   end
 
+  def hide_direct_conversation(conversation_id, user_id) do
+    with :ok <- Mafia.WriteGate.ensure_enabled(),
+         {:ok, %Conversation{kind: :direct}} <-
+           Ash.get(Conversation, conversation_id, authorize?: false),
+         {:ok, member} <- membership(conversation_id, user_id),
+         {:ok, _member} <-
+           member
+           |> Ash.Changeset.for_update(:update, %{hidden_at: DateTime.utc_now()})
+           |> Ash.update(authorize?: false) do
+      broadcast_user_conversations([user_id])
+      :ok
+    else
+      {:ok, %Conversation{}} -> {:error, :managed_conversation}
+      {:error, _reason} = error -> error
+      _ -> {:error, :not_found}
+    end
+  end
+
   def leave_group_conversation(conversation_id, user_id) do
     with :ok <- Mafia.WriteGate.ensure_enabled(),
          {:ok, _conversation} <- standalone_group_conversation(conversation_id),
@@ -461,6 +560,23 @@ defmodule Mafia.Chat do
 
   def toggle_reaction(_, _, _), do: {:error, :unsupported_reaction}
 
+  def valid_gif_url?(url) when is_binary(url) do
+    url = String.trim(url)
+
+    byte_size(url) <= @gif_url_max_length and not Regex.match?(~r/[\s\x00-\x1F\x7F]/u, url) and
+      case URI.parse(url) do
+        %URI{scheme: scheme, host: host, path: path, userinfo: nil}
+        when is_binary(scheme) and is_binary(host) and host != "" and is_binary(path) ->
+          String.downcase(scheme) == "https" and
+            String.ends_with?(String.downcase(path), ".gif")
+
+        _ ->
+          false
+      end
+  end
+
+  def valid_gif_url?(_), do: false
+
   def subscribe(conversation_id) do
     Phoenix.PubSub.subscribe(Mafia.PubSub, "conversation:#{conversation_id}")
   end
@@ -475,8 +591,30 @@ defmodule Mafia.Chat do
     :ok
   end
 
+  @doc "Publishes conversation-list refreshes after a caller-owned transaction commits."
+  def refresh_user_conversations(user_ids) do
+    broadcast_user_conversations(List.wrap(user_ids))
+    :ok
+  end
+
   defp add_members(conversation_id, creator_id, member_ids),
     do: add_members(conversation_id, creator_id, member_ids, [], true)
+
+  defp direct_conversation_for(creator_id, recipient_id) do
+    desired_members = MapSet.new([creator_id, recipient_id])
+
+    ConversationMember
+    |> Ash.Query.filter(user_id == ^creator_id)
+    |> Ash.Query.load(:conversation)
+    |> Ash.read!(authorize?: false)
+    |> Enum.map(& &1.conversation)
+    |> Enum.reject(& &1.is_archived)
+    |> Enum.filter(&(&1.kind == :direct))
+    |> Ash.load!(:members, authorize?: false)
+    |> Enum.find(fn conversation ->
+      MapSet.new(conversation.members, & &1.user_id) == desired_members
+    end)
+  end
 
   defp add_members(conversation_id, creator_id, member_ids, admin_ids, include_creator?) do
     admin_ids = MapSet.new([creator_id | admin_ids])
@@ -570,6 +708,46 @@ defmodule Mafia.Chat do
     end
   end
 
+  defp unhide_member(conversation_id, user_id) do
+    with {:ok, member} <- membership(conversation_id, user_id) do
+      if is_nil(member.hidden_at) do
+        :ok
+      else
+        member
+        |> Ash.Changeset.for_update(:update, %{hidden_at: nil})
+        |> Ash.update(authorize?: false)
+        |> case do
+          {:ok, _member} -> :ok
+          {:error, _reason} = error -> error
+        end
+      end
+    end
+  end
+
+  defp restore_direct_members(%Conversation{kind: :direct, id: conversation_id}) do
+    case ConversationMember
+         |> Ash.Query.filter(conversation_id == ^conversation_id and not is_nil(hidden_at))
+         |> Ash.read(authorize?: false) do
+      {:ok, members} ->
+        restored_user_ids =
+          Enum.flat_map(members, fn member ->
+            case member
+                 |> Ash.Changeset.for_update(:update, %{hidden_at: nil})
+                 |> Ash.update(authorize?: false) do
+              {:ok, _member} -> [member.user_id]
+              {:error, _reason} -> []
+            end
+          end)
+
+        broadcast_user_conversations(restored_user_ids)
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp restore_direct_members(_conversation), do: :ok
+
   defp admin_membership(conversation_id, user_id) do
     case membership(conversation_id, user_id) do
       {:ok, %ConversationMember{role: :admin} = member} -> {:ok, member}
@@ -615,8 +793,9 @@ defmodule Mafia.Chat do
     |> Enum.map(& &1.user_id)
   end
 
-  defp create_message(conversation_id, user_id, body, attrs \\ %{}) do
+  defp create_message(conversation_id, user_id, body, attrs) do
     attachments = Map.get(attrs, :attachments, [])
+    image_attachments = Enum.filter(attachments, &(attachment_type(&1) == :image))
 
     message_attrs = %{
       conversation_id: conversation_id,
@@ -627,17 +806,18 @@ defmodule Mafia.Chat do
       attachments: Enum.map(attachments, &Map.drop(&1, ["data"]))
     }
 
-    if attachments == [] do
+    if image_attachments == [] do
       Message
       |> Ash.Changeset.for_create(:create, message_attrs)
       |> Ash.create(authorize?: false)
     else
       Repo.transaction(fn ->
-        with {:ok, message} <-
+        with :ok <- lock_open_conversation(conversation_id),
+             {:ok, message} <-
                Message
                |> Ash.Changeset.for_create(:create, message_attrs)
                |> Ash.create(authorize?: false),
-             :ok <- store_message_images(message.id, user_id, attachments) do
+             :ok <- store_message_images(message.id, user_id, image_attachments) do
           message
         else
           {:error, reason} -> Repo.rollback(reason)
@@ -647,15 +827,15 @@ defmodule Mafia.Chat do
     end
   end
 
-  defp verify_can_send(
-         _member,
-         %{is_archived: true},
-         _body,
-         _attachments,
-         _system?,
-         _user_id
-       ),
-       do: {:error, :archived}
+  defp touch_conversation(conversation) do
+    conversation
+    |> Ash.Changeset.for_update(:update, %{})
+    |> Ash.Changeset.force_change_attribute(:updated_at, DateTime.utc_now())
+    |> Ash.update(authorize?: false)
+  end
+
+  defp verify_can_send(_member, %{is_archived: true}, _body, _attachments, _system?, _user_id),
+    do: {:error, :archived}
 
   defp verify_can_send(
          %{role: :spectator},
@@ -677,8 +857,8 @@ defmodule Mafia.Chat do
        ),
        do: {:error, :muted}
 
-  defp verify_can_send(%{role: :admin}, _conversation, body, _attachments, true, _user_id),
-    do: validate_body(body)
+  defp verify_can_send(%{role: :admin}, _conversation, body, attachments, true, _user_id),
+    do: validate_message(body, attachments)
 
   defp verify_can_send(
          _member,
@@ -692,20 +872,33 @@ defmodule Mafia.Chat do
 
   defp verify_can_send(_member, conversation, body, attachments, _system?, user_id) do
     with :ok <- verify_game_capability(conversation, user_id, "post_public") do
-      validate_message_content(body, attachments)
+      validate_message(body, attachments)
     end
   end
 
-  defp validate_body(""), do: {:error, :empty_message}
-  defp validate_body(body) when byte_size(body) > 10_000, do: {:error, :message_too_long}
-  defp validate_body(_), do: :ok
+  defp validate_message("", []), do: {:error, :empty_message}
 
-  defp validate_message_content("", []), do: {:error, :empty_message}
-
-  defp validate_message_content(body, _attachments) when byte_size(body) > 10_000,
+  defp validate_message(body, _attachments) when byte_size(body) > 10_000,
     do: {:error, :message_too_long}
 
-  defp validate_message_content(_body, _attachments), do: :ok
+  defp validate_message(_body, _attachments), do: :ok
+
+  defp gif_attachments(nil), do: {:ok, []}
+
+  defp gif_attachments(url) do
+    case url |> to_string() |> String.trim() do
+      "" ->
+        {:ok, []}
+
+      url when byte_size(url) <= @gif_url_max_length ->
+        if valid_gif_url?(url),
+          do: {:ok, [%{"type" => "gif", "url" => url}]},
+          else: {:error, :invalid_gif}
+
+      _ ->
+        {:error, :invalid_gif}
+    end
+  end
 
   defp validate_reply(_conversation_id, nil), do: :ok
 
@@ -723,16 +916,28 @@ defmodule Mafia.Chat do
   defp normalize_reply_id(reply_to_message_id) when reply_to_message_id in [nil, ""], do: nil
   defp normalize_reply_id(reply_to_message_id), do: reply_to_message_id
 
-  defp validate_attachments(attachments) when is_list(attachments) and length(attachments) <= 1 do
-    Enum.reduce_while(attachments, :ok, fn attachment, :ok ->
-      case validate_attachment(attachment) do
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
-    end)
+  defp validate_attachments(attachments) when is_list(attachments) do
+    types = Enum.map(attachments, &attachment_type/1)
+
+    if length(attachments) <= 2 and Enum.count(types, &(&1 == :image)) <= 1 and
+         Enum.count(types, &(&1 == :gif)) <= 1 and
+         Enum.all?(types, &(&1 in [:image, :gif])) do
+      Enum.reduce_while(attachments, :ok, fn attachment, :ok ->
+        case validate_attachment(attachment) do
+          :ok -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+    else
+      {:error, :invalid_image}
+    end
   end
 
   defp validate_attachments(_attachments), do: {:error, :invalid_image}
+
+  defp validate_attachment(%{"type" => "gif", "url" => url}) do
+    if valid_gif_url?(url), do: :ok, else: {:error, :invalid_gif}
+  end
 
   defp validate_attachment(
          %{
@@ -745,6 +950,7 @@ defmodule Mafia.Chat do
        when is_binary(id) and is_binary(content_type) and is_integer(size) and
               is_binary(data) do
     with {:ok, _id} <- Ecto.UUID.cast(id),
+         true <- Map.get(attachment, "type") in [nil, "image"],
          true <- size == byte_size(data),
          :ok <- validate_image_size(data),
          {:ok, ^content_type} <- validate_image(data),
@@ -756,6 +962,15 @@ defmodule Mafia.Chat do
   end
 
   defp validate_attachment(_attachment), do: {:error, :invalid_image}
+
+  defp attachment_type(%{"type" => "gif"}), do: :gif
+  defp attachment_type(%{"type" => "image"}), do: :image
+
+  defp attachment_type(%{"id" => id, "content_type" => content_type})
+       when is_binary(id) and is_binary(content_type),
+       do: :image
+
+  defp attachment_type(_attachment), do: :invalid
 
   defp validate_image_size(data) when byte_size(data) > @image_max_bytes,
     do: {:error, :image_too_large}
@@ -955,6 +1170,17 @@ defmodule Mafia.Chat do
     |> String.slice(0, 120)
   end
 
+  defp lock_open_conversation(conversation_id) do
+    case Repo.query(
+           "SELECT is_archived FROM conversations WHERE id = $1::uuid FOR UPDATE",
+           [conversation_id]
+         ) do
+      {:ok, %{rows: [[false]]}} -> :ok
+      {:ok, _result} -> {:error, :archived}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp store_message_images(message_id, user_id, attachments) do
     # ponytail: database blobs keep this durable without new infrastructure;
     # move media to private object storage if attachment volume becomes material.
@@ -1078,17 +1304,22 @@ defmodule Mafia.Chat do
   defp maybe_rate_limit_send(true, _conversation_id, _user_id), do: :ok
 
   defp maybe_rate_limit_send(false, conversation_id, user_id) do
-    rate_limit(
-      "chat:send:#{user_id}:#{conversation_id}",
-      @send_rate_window,
-      @send_rate_limit
-    )
+    with :ok <-
+           rate_limit(
+             "chat:send:#{user_id}:#{conversation_id}",
+             @send_rate_window,
+             @send_rate_limit
+           ) do
+      rate_limit("chat:send:#{user_id}", @send_rate_window, @global_send_rate_limit)
+    end
   end
 
-  defp maybe_rate_limit_image([], _user_id), do: :ok
-
-  defp maybe_rate_limit_image(_attachments, user_id) do
-    rate_limit("chat:image:#{user_id}", @image_rate_window, @image_rate_limit)
+  defp maybe_rate_limit_image(attachments, user_id) do
+    if Enum.any?(attachments, &(attachment_type(&1) == :image)) do
+      rate_limit("chat:image:#{user_id}", @image_rate_window, @image_rate_limit)
+    else
+      :ok
+    end
   end
 
   defp rate_limit_reaction(conversation_id, user_id) do
@@ -1112,6 +1343,14 @@ defmodule Mafia.Chat do
       "chat:group-create:#{user_id}",
       @group_create_rate_window,
       @group_create_rate_limit
+    )
+  end
+
+  defp rate_limit_direct_start(user_id) do
+    rate_limit(
+      "chat:direct-start:#{user_id}",
+      @direct_start_rate_window,
+      @direct_start_rate_limit
     )
   end
 
@@ -1174,6 +1413,13 @@ defmodule Mafia.Chat do
         true ->
           case Games.fetch_player(game.id, user_id) do
             {:ok, player} ->
+              faction_matches? =
+                Map.get(conversation.metadata || %{}, "channel") != "faction" or
+                  GameRules.canonical_faction_key(player.alignment) ==
+                    GameRules.canonical_faction_key(
+                      Map.get(conversation.metadata || %{}, "faction")
+                    )
+
               required =
                 cond do
                   private_game_channel?(conversation) and capability == "post_public" ->
@@ -1186,9 +1432,10 @@ defmodule Mafia.Chat do
                     [capability]
                 end
 
-              if Enum.all?(required, &GameRules.capability?(game.ruleset, player, &1)),
-                do: :ok,
-                else: {:error, :capability_not_allowed}
+              if faction_matches? and
+                   Enum.all?(required, &GameRules.capability?(game.ruleset, player, &1)),
+                 do: :ok,
+                 else: {:error, :capability_not_allowed}
 
             _ ->
               {:error, :read_only}
@@ -1205,13 +1452,29 @@ defmodule Mafia.Chat do
 
   defp private_game_channel_open?(conversation, game) do
     metadata = conversation.metadata || %{}
+    channel = Map.get(metadata, "channel")
 
     phase_matches? =
-      Map.get(metadata, "channel") != "side_chat" or
+      channel != "side_chat" or
         Map.get(metadata, "phase_number") == game.phase_number
 
-    game.status in [:day, :night] and phase_matches? and
-      GameRules.private_chat_allowed?(game.ruleset, game.status)
+    policy_open? =
+      case channel do
+        "faction" ->
+          GameRules.faction_chat_allowed?(
+            game.ruleset,
+            Map.get(metadata, "faction"),
+            game.status
+          )
+
+        "side_chat" ->
+          GameRules.private_chat_allowed?(game.ruleset, game.status)
+
+        _ ->
+          false
+      end
+
+    game.status in [:day, :night] and phase_matches? and policy_open?
   end
 
   defp transaction_result({:ok, result}), do: {:ok, result}

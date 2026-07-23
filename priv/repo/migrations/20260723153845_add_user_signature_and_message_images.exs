@@ -25,6 +25,7 @@ defmodule Mafia.Repo.Migrations.AddUserSignatureAndMessageImages do
     end
 
     create unique_index(:message_images, [:message_id])
+    create index(:messages, [:user_id])
 
     create constraint(:message_images, :message_images_size,
              check: "octet_length(data) BETWEEN 1 AND 2000000"
@@ -37,6 +38,7 @@ defmodule Mafia.Repo.Migrations.AddUserSignatureAndMessageImages do
 
   def down do
     drop table(:message_images)
+    drop_if_exists index(:messages, [:user_id])
 
     alter table(:users) do
       remove :signature

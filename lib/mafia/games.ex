@@ -48,6 +48,29 @@ defmodule Mafia.Games do
     Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
   end
 
+  defp game_chat_snapshot(game) do
+    {
+      Chat.list_game_conversations(game.id),
+      Enum.uniq([game.host_id | player_user_ids(game.id)])
+    }
+  end
+
+  defp refresh_game_chats(game, previous_snapshot \\ {[], []}) do
+    {previous_conversations, previous_user_ids} = previous_snapshot
+    {current_conversations, current_user_ids} = game_chat_snapshot(game)
+
+    conversations =
+      Enum.uniq_by(previous_conversations ++ current_conversations, & &1.id)
+
+    user_ids = Enum.uniq(previous_user_ids ++ current_user_ids)
+    publish_game_chat_refreshes(conversations, user_ids)
+  end
+
+  defp publish_game_chat_refreshes(conversations, user_ids) do
+    Enum.each(conversations, &Chat.refresh_conversation(&1.id))
+    Chat.refresh_user_conversations(user_ids)
+  end
+
   # ============================================================================
   # Game lifecycle
   # ============================================================================
@@ -102,19 +125,26 @@ defmodule Mafia.Games do
          :ok <- authorize_host(game, host_id),
          :ok <- ensure_revision(game, expected_revision) do
       normalized = GameRules.normalize(ruleset)
+      chat_snapshot = game_chat_snapshot(game)
 
       result =
         Repo.transaction(fn ->
           current = get_game!(game.id)
+          normalized = reconcile_legacy_alignment_compatibility(current, normalized)
 
           with :ok <- ensure_revision(current, expected_revision),
+               :ok <- ensure_rules_compatible(current, normalized),
                {:ok, updated} <-
                  update_game(current, %{
                    ruleset: normalized,
                    rules_revision: current.rules_revision + 1
                  }),
-               {:ok, _revision} <- create_rule_revision(updated, host_id, summary) do
-            updated
+               {:ok, _revision} <- create_rule_revision(updated, host_id, summary),
+               :ok <- apply_current_chat_rules(updated),
+               :ok <- sync_player_mutes(updated),
+               :ok <- sync_private_faction_chats(updated),
+               {:ok, resolved} <- resolve_configuration_victory(get_game!(updated.id)) do
+            resolved
           else
             {:error, error} -> Repo.rollback(error)
           end
@@ -122,11 +152,9 @@ defmodule Mafia.Games do
 
       case result do
         {:ok, updated} ->
-          _ = apply_current_chat_rules(updated)
-          _ = sync_player_mutes(updated)
-          _ = sync_private_faction_chats(updated)
           schedule_phase_timer(updated)
           _ = broadcast(updated.id, {:rules_changed, updated.rules_revision})
+          _ = refresh_game_chats(updated, chat_snapshot)
           {:ok, updated}
 
         {:error, error} ->
@@ -218,19 +246,28 @@ defmodule Mafia.Games do
   def delete_game(%MafiaGame{} = game, host_id) do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id) do
-      case Ash.destroy(game, authorize?: false) do
-        {:error, _} = err ->
-          err
+      conversations = Chat.list_game_conversations(game.id)
+      user_ids = Enum.uniq([host_id | player_user_ids(game.id)])
 
-        _ok ->
-          _ =
-            for conversation <- Chat.list_game_conversations(game.id) do
-              _ = Chat.archive_conversation(conversation.id, host_id)
-            end
+      result =
+        Repo.transaction(fn ->
+          with :ok <- archive_game_conversations(conversations, host_id),
+               :ok <- destroy_game(game) do
+            :ok
+          else
+            {:error, error} -> Repo.rollback(error)
+          end
+        end)
 
+      case result do
+        {:ok, :ok} ->
           _ = broadcast(game.id, :game_deleted)
           _ = refresh_lobby()
+          _ = publish_game_chat_refreshes(conversations, user_ids)
           :ok
+
+        {:error, error} ->
+          {:error, error}
       end
     end
   end
@@ -370,16 +407,38 @@ defmodule Mafia.Games do
   def moderate_player(%MafiaGame{} = game, player_id, host_id, attrs) when is_map(attrs) do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
-         {:ok, player} <- fetch_player_by_id(game.id, player_id),
-         {:ok, normalized} <- normalize_player_attrs(attrs),
-         {:ok, updated} <-
-           player
-           |> Ash.Changeset.for_update(:update, normalized)
-           |> Ash.update(authorize?: false) do
-      _ = sync_player_mute(game, updated)
-      _ = sync_private_faction_chats(game)
-      _ = broadcast(game.id, :roster_changed)
-      {:ok, updated}
+         {:ok, normalized} <- normalize_player_attrs(attrs) do
+      chat_snapshot = game_chat_snapshot(game)
+
+      result =
+        Repo.transaction(fn ->
+          current = get_game!(game.id)
+
+          with :ok <- authorize_host(current, host_id),
+               {:ok, current_player} <- fetch_player_by_id(current.id, player_id),
+               :ok <- ensure_player_update_compatible(current, current_player, normalized),
+               {:ok, updated} <-
+                 current_player
+                 |> Ash.Changeset.for_update(:update, normalized)
+                 |> Ash.update(authorize?: false),
+               :ok <- sync_player_mute(current, updated),
+               :ok <- sync_private_faction_chats(current),
+               {:ok, _resolved_game} <- resolve_configuration_victory(get_game!(current.id)) do
+            updated
+          else
+            {:error, error} -> Repo.rollback(error)
+          end
+        end)
+
+      case result do
+        {:ok, updated} ->
+          _ = broadcast(game.id, :roster_changed)
+          _ = refresh_game_chats(get_game!(game.id), chat_snapshot)
+          {:ok, updated}
+
+        {:error, error} ->
+          {:error, error}
+      end
     end
   end
 
@@ -621,7 +680,7 @@ defmodule Mafia.Games do
 
   @doc """
   Assigns roles to players. `assignments` is a list of maps with `:player_id`,
-  `:role_name`, `:alignment` (`:town` | `:mafia`), and optional `:role_pm_body`.
+  `:role_name`, a configured faction key in `:alignment`, and optional `:role_pm_body`.
   Only valid while the game is in `:setup`.
   """
   def assign_roles(%MafiaGame{status: :setup} = game, host_id, assignments) do
@@ -658,38 +717,53 @@ defmodule Mafia.Games do
   least one mafia and one town.
   """
   def start_game(%MafiaGame{status: :setup} = game, host_id) do
-    game = ensure_players_loaded(game)
-
     with :ok <- WriteGate.ensure_enabled(),
-         :ok <- authorize_host(game, host_id),
-         :ok <- validate_startable(game),
-         {:ok, day_conv} <- provision_day_thread(game),
-         {:ok, faction_conversations} <- provision_private_faction_chats(game) do
-      mafia_conv = Map.get(faction_conversations, "mafia")
+         :ok <- authorize_host(game, host_id) do
+      result =
+        Repo.transaction(fn ->
+          with :ok <- lock_game_for_update(game.id),
+               current = game.id |> get_game!() |> ensure_players_loaded(),
+               :ok <- authorize_host(current, host_id),
+               :ok <- ensure_setup_game(current),
+               :ok <- validate_startable(current),
+               {:ok, day_conv} <- provision_day_thread(current),
+               {:ok, faction_conversations} <- provision_private_faction_chats(current),
+               mafia_conv = Map.get(faction_conversations, "mafia"),
+               {:ok, started} <-
+                 update_game(current, %{
+                   status: :day,
+                   phase_number: 1,
+                   phase_ends_at: phase_deadline(current, "day_length_seconds"),
+                   day_thread_conversation_id: day_conv.id,
+                   mafia_chat_conversation_id: mafia_conv && mafia_conv.id
+                 }),
+               :ok <- sync_player_mutes(started),
+               :ok <- sync_private_faction_chats(started) do
+            get_game!(started.id)
+          else
+            {:error, error} -> Repo.rollback(error)
+          end
+        end)
 
-      {:ok, game} =
-        update_game(game, %{
-          status: :day,
-          phase_number: 1,
-          phase_ends_at: phase_deadline(game, "day_length_seconds"),
-          day_thread_conversation_id: day_conv.id,
-          mafia_chat_conversation_id: mafia_conv && mafia_conv.id
-        })
+      case result do
+        {:ok, started} ->
+          post_system(started, "Day 1 begins. Discuss, and vote to lynch.")
+          schedule_phase_timer(started)
+          _ = broadcast(started.id, {:phase_changed, started})
+          _ = refresh_lobby()
+          _ = refresh_game_chats(started)
 
-      _ = sync_player_mutes(game)
-      _ = sync_private_faction_chats(game)
-      post_system(game, "Day 1 begins. Discuss, and vote to lynch.")
-      schedule_phase_timer(game)
-      _ = broadcast(game.id, {:phase_changed, game})
-      _ = refresh_lobby()
+          notify_phase(
+            started,
+            "Mafia — Day 1 begins",
+            "#{game_label(started)} has started. Day 1 is open."
+          )
 
-      notify_phase(
-        game,
-        "Mafia — Day 1 begins",
-        "#{game_label(game)} has started. Day 1 is open."
-      )
+          {:ok, started}
 
-      {:ok, game}
+        {:error, error} ->
+          {:error, error}
+      end
     end
   end
 
@@ -704,6 +778,8 @@ defmodule Mafia.Games do
   """
   def resolve_day(%MafiaGame{status: :day} = game) do
     with :ok <- WriteGate.ensure_enabled() do
+      chat_snapshot = game_chat_snapshot(game)
+
       result =
         Repo.transaction(fn ->
           with :ok <- lock_game_for_update(game.id) do
@@ -724,7 +800,7 @@ defmodule Mafia.Games do
 
       case result do
         {:ok, resolved} ->
-          publish_resolved_day(resolved)
+          publish_resolved_day(resolved, chat_snapshot)
           {:ok, resolved}
 
         {:error, reason} ->
@@ -745,13 +821,10 @@ defmodule Mafia.Games do
     end
   end
 
-  defp publish_resolved_day(game) do
+  defp publish_resolved_day(game, chat_snapshot) do
     _ = broadcast(game.id, {:phase_changed, game})
     _ = refresh_lobby()
-
-    game.id
-    |> Chat.list_game_conversations()
-    |> Enum.each(&Chat.refresh_conversation(&1.id))
+    _ = refresh_game_chats(game, chat_snapshot)
 
     _ =
       game.id
@@ -790,17 +863,18 @@ defmodule Mafia.Games do
   def open_next_day(%MafiaGame{status: :night} = game, host_id) do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
+         chat_snapshot = game_chat_snapshot(game),
          {:ok, game} <-
            update_phase(game, false, %{
              status: :day,
              phase_number: game.phase_number + 1,
              phase_ends_at: phase_deadline(game, "day_length_seconds")
            }) do
-      _ = sync_private_faction_chats(game)
       post_system(game, "Dawn breaks on Day #{day_number(game)}.")
       schedule_phase_timer(game)
       _ = broadcast(game.id, {:phase_changed, game})
       _ = refresh_lobby()
+      _ = refresh_game_chats(game, chat_snapshot)
       notify_phase(game, "Mafia — Day #{day_number(game)}", "Dawn breaks. The day phase is open.")
       {:ok, game}
     end
@@ -840,7 +914,6 @@ defmodule Mafia.Games do
              phase_number: game.phase_number + 1,
              phase_ends_at: phase_deadline(game, "night_length_seconds")
            }) do
-      _ = sync_private_faction_chats(game)
       # System messages are allowed through a read-only day thread. Post only
       # after the lock + phase update commit so a failed transition can't claim
       # that night began while the game is still in Day.
@@ -873,18 +946,29 @@ defmodule Mafia.Games do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
          {:ok, player} <- fetch_player_by_id(game.id, player_id),
+         chat_snapshot = game_chat_snapshot(game),
          :ok <- do_eliminate(game, player, reason) do
-      case maybe_finish(game) do
-        {:finished, finished} -> {:ok, finished}
-        {:continue, game} -> {:ok, game}
-        {:error, _reason} = error -> error
+      result =
+        case maybe_finish(get_game!(game.id)) do
+          {:finished, finished} -> {:ok, finished}
+          {:continue, game} -> {:ok, game}
+          {:error, _reason} = error -> error
+        end
+
+      case result do
+        {:ok, resolved} ->
+          _ = refresh_game_chats(resolved, chat_snapshot)
+          result
+
+        {:error, _reason} = error ->
+          error
       end
     end
   end
 
   defp do_eliminate(game, player, reason) do
     case Repo.transaction(fn ->
-           with {:ok, _player} <-
+           with {:ok, updated_player} <-
                   player
                   |> Ash.Changeset.for_update(:update, %{
                     is_alive: false,
@@ -893,7 +977,8 @@ defmodule Mafia.Games do
                     eliminated_phase: game.phase_number
                   })
                   |> Ash.update(authorize?: false),
-                :ok <- sync_player_mute(game, %{player | is_alive: false, status: "dead"}) do
+                :ok <- sync_player_mute(game, updated_player),
+                :ok <- sync_private_faction_chats(game) do
              :ok
            else
              {:error, error} -> Repo.rollback(error)
@@ -905,7 +990,6 @@ defmodule Mafia.Games do
         if writable_day?(game) and reveal_on_death?(game),
           do: post_system(game, flip_text(game, player))
 
-        _ = sync_private_faction_chats(game)
         _ = broadcast(game.id, :roster_changed)
         :ok
 
@@ -930,10 +1014,12 @@ defmodule Mafia.Games do
       |> Ash.Query.filter(mafia_game_id == ^game.id and status == "active")
       |> Ash.read!(authorize?: false)
 
-    mafia = Enum.count(players, &(faction_key(&1.alignment) == "mafia"))
-    town = Enum.count(players, &(faction_key(&1.alignment) != "mafia"))
+    faction_keys = Enum.map(players, &faction_key(&1.alignment))
+    mafia = Enum.count(faction_keys, &(&1 == "mafia"))
+    town = Enum.count(faction_keys, &(&1 == "town"))
 
     cond do
+      Enum.any?(faction_keys, &(&1 not in ["town", "mafia"])) -> {:continue, game}
       mafia == 0 -> finish_result(game, "town")
       mafia >= town -> finish_result(game, "mafia")
       true -> {:continue, game}
@@ -953,8 +1039,9 @@ defmodule Mafia.Games do
   defp update_phase(game, read_only?, attrs) do
     Repo.transaction(fn ->
       with :ok <- set_day_thread_read_only(game, read_only?),
-           {:ok, updated} <- update_game(game, attrs) do
-        updated
+           {:ok, updated} <- update_game(game, attrs),
+           :ok <- sync_private_faction_chats(updated) do
+        get_game!(updated.id)
       else
         {:error, error} -> Repo.rollback(error)
       end
@@ -981,11 +1068,11 @@ defmodule Mafia.Games do
              winner_faction: faction,
              phase_ends_at: nil
            }) do
-      _ = sync_private_faction_chats(game)
-      post_system(game, "Game over — the #{faction} win.")
+      faction_name = GameRules.faction_name(game.ruleset, faction) || faction
+      post_system(game, "Game over — the #{faction_name} win.")
       _ = broadcast(game.id, {:phase_changed, game})
       _ = refresh_lobby()
-      notify_phase(game, "Mafia — game over", "The #{faction} win #{game_label(game)}.")
+      notify_phase(game, "Mafia — game over", "The #{faction_name} win #{game_label(game)}.")
       {:ok, game}
     end
   end
@@ -996,8 +1083,16 @@ defmodule Mafia.Games do
 
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id),
-         :ok <- if(faction == "", do: {:error, :winner_required}, else: :ok) do
-      do_finish_game(game, faction)
+         :ok <- if(faction == "", do: {:error, :winner_required}, else: :ok),
+         chat_snapshot = game_chat_snapshot(game) do
+      case do_finish_game(game, faction) do
+        {:ok, finished} = result ->
+          _ = refresh_game_chats(finished, chat_snapshot)
+          result
+
+        {:error, _reason} = error ->
+          error
+      end
     end
   end
 
@@ -1159,30 +1254,135 @@ defmodule Mafia.Games do
   # Internal guards / helpers
   # ============================================================================
 
+  defp archive_game_conversations(conversations, host_id) do
+    Enum.reduce_while(conversations, :ok, fn conversation, :ok ->
+      case Chat.archive_conversation(conversation.id, host_id) do
+        {:ok, _archived} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp destroy_game(game) do
+    case Ash.destroy(game, authorize?: false) do
+      :ok -> :ok
+      {:ok, _game} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp ensure_players_loaded(%MafiaGame{players: %Ash.NotLoaded{}} = game),
     do: Ash.load!(game, :players, authorize?: false)
 
   defp ensure_players_loaded(%MafiaGame{} = game), do: game
 
+  defp ensure_setup_game(%MafiaGame{status: :setup}), do: :ok
+  defp ensure_setup_game(%MafiaGame{}), do: {:error, :game_already_started}
+
   defp validate_startable(%MafiaGame{players: players, ruleset: ruleset}) do
     rules = GameRules.normalize(ruleset)
+
+    configured_factions? =
+      is_list(Map.get(ruleset || %{}, "factions")) and
+        not rules["_legacy_unconfigured_alignments"]
+
     active = Enum.filter(players, &(GameRules.player_status(&1) == "active"))
     aligned = Enum.filter(active, &(is_binary(&1.alignment) and &1.alignment != ""))
+    configured = MapSet.new(GameRules.factions(rules), &faction_key(&1["key"]))
     mafia = Enum.count(aligned, &(faction_key(&1.alignment) == "mafia"))
     town = Enum.count(aligned, &(faction_key(&1.alignment) == "town"))
     min_players = rules["min_players"]
     max_players = rules["max_players"]
 
     cond do
-      length(active) < min_players and min_players == 3 -> {:error, :need_at_least_3_players}
-      length(active) < min_players -> {:error, :need_more_players}
-      max_players > 0 and length(active) > max_players -> {:error, :too_many_players}
-      length(aligned) != length(active) -> {:error, :all_players_need_a_role}
-      rules["win_mode"] == "classic" and mafia < 1 -> {:error, :need_at_least_one_mafia}
-      rules["win_mode"] == "classic" and town < 1 -> {:error, :need_at_least_one_town}
-      true -> :ok
+      length(active) < min_players and min_players == 3 ->
+        {:error, :need_at_least_3_players}
+
+      length(active) < min_players ->
+        {:error, :need_more_players}
+
+      max_players > 0 and length(active) > max_players ->
+        {:error, :too_many_players}
+
+      length(aligned) != length(active) ->
+        {:error, :all_players_need_a_role}
+
+      configured_factions? and
+          Enum.any?(aligned, &(not MapSet.member?(configured, faction_key(&1.alignment)))) ->
+        {:error, :players_need_configured_factions}
+
+      rules["win_mode"] == "classic" and
+          Enum.any?(aligned, &(faction_key(&1.alignment) not in ["town", "mafia"])) ->
+        {:error, :classic_requires_town_and_mafia}
+
+      rules["win_mode"] == "classic" and mafia < 1 ->
+        {:error, :need_at_least_one_mafia}
+
+      rules["win_mode"] == "classic" and town < 1 ->
+        {:error, :need_at_least_one_town}
+
+      true ->
+        :ok
     end
   end
+
+  defp ensure_rules_compatible(%MafiaGame{status: :setup}, _rules), do: :ok
+
+  defp ensure_rules_compatible(%MafiaGame{} = game, %{"win_mode" => "classic"}) do
+    players =
+      MafiaPlayer
+      |> Ash.Query.filter(mafia_game_id == ^game.id and status == "active")
+      |> Ash.read!(authorize?: false)
+
+    if Enum.all?(players, &(faction_key(&1.alignment) in ["town", "mafia"])),
+      do: :ok,
+      else: {:error, :classic_requires_town_and_mafia}
+  end
+
+  defp ensure_rules_compatible(_game, _rules), do: :ok
+
+  defp ensure_player_update_compatible(game, player, attrs) do
+    rules = GameRules.normalize(game.ruleset)
+    status = Map.get(attrs, :status, GameRules.player_status(player))
+    alignment = Map.get(attrs, :alignment, player.alignment)
+
+    if rules["win_mode"] == "classic" and status == "active" and
+         faction_key(alignment) not in ["town", "mafia"],
+       do: {:error, :classic_requires_town_and_mafia},
+       else: :ok
+  end
+
+  defp reconcile_legacy_alignment_compatibility(%MafiaGame{} = game, rules) do
+    raw_rules = stringify_map_keys(game.ruleset || %{})
+    current = GameRules.normalize(raw_rules)
+
+    if is_list(raw_rules["factions"]) and not current["_legacy_unconfigured_alignments"] do
+      rules
+    else
+      configured_keys = MapSet.new(GameRules.factions(rules), &faction_key(&1["key"]))
+
+      unresolved_alignment? =
+        MafiaPlayer
+        |> Ash.Query.filter(mafia_game_id == ^game.id)
+        |> Ash.read!(authorize?: false)
+        |> Enum.map(& &1.alignment)
+        |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+        |> Enum.any?(&(not MapSet.member?(configured_keys, faction_key(&1))))
+
+      Map.put(rules, "_legacy_unconfigured_alignments", unresolved_alignment?)
+    end
+  end
+
+  defp resolve_configuration_victory(%MafiaGame{status: status} = game)
+       when status in [:day, :night] do
+    case maybe_finish(game) do
+      {:finished, resolved} -> {:ok, resolved}
+      {:continue, resolved} -> {:ok, resolved}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_configuration_victory(%MafiaGame{} = game), do: {:ok, game}
 
   defp provision_day_thread(game) do
     Chat.create_group_conversation(game.host_id, Enum.map(game.players, & &1.user_id),
@@ -1199,12 +1399,14 @@ defmodule Mafia.Games do
 
   defp provision_private_faction_chats(game) do
     rules = GameRules.normalize(game.ruleset)
-    factions = rules["private_factions"]
+    factions = Enum.reject(GameRules.factions(rules), &(&1["chat_policy"] == "disabled"))
 
     Enum.reduce_while(factions, {:ok, %{}}, fn faction, {:ok, conversations} ->
+      key = faction["key"]
+
       member_ids =
         game.players
-        |> Enum.filter(&(faction_key(&1.alignment) == faction_key(faction)))
+        |> Enum.filter(&(faction_key(&1.alignment) == faction_key(key)))
         |> Enum.map(& &1.user_id)
 
       if member_ids == [] do
@@ -1214,16 +1416,16 @@ defmodule Mafia.Games do
                kind: :game,
                game_id: game.id,
                include_creator?: rules["private_chat_include_moderator"],
-               title: "#{game_label(game)} — #{String.capitalize(faction)}",
+               title: "#{game_label(game)} — #{faction["name"]}",
                metadata: %{
                  "mafia_game_id" => game.id,
                  "moderator_id" => game.host_id,
                  "channel" => "faction",
-                 "faction" => faction
+                 "faction" => key
                }
              ) do
           {:ok, conversation} ->
-            {:cont, {:ok, Map.put(conversations, faction, conversation)}}
+            {:cont, {:ok, Map.put(conversations, key, conversation)}}
 
           {:error, reason} ->
             {:halt, {:error, reason}}
@@ -1236,7 +1438,7 @@ defmodule Mafia.Games do
 
   defp sync_private_faction_chats(%MafiaGame{} = game) do
     rules = GameRules.normalize(game.ruleset)
-    factions = rules["private_factions"]
+    factions = Enum.reject(GameRules.factions(rules), &(&1["chat_policy"] == "disabled"))
 
     players =
       MafiaPlayer
@@ -1248,74 +1450,122 @@ defmodule Mafia.Games do
       |> Chat.list_game_conversations()
       |> Enum.filter(&(Map.get(&1.metadata || %{}, "channel") == "faction"))
 
-    existing_by_faction =
-      Map.new(existing, fn conversation ->
-        {faction_key(Map.get(conversation.metadata || %{}, "faction")), conversation}
-      end)
+    {existing_by_faction, duplicate_ids} =
+      Enum.reduce(existing, {%{}, MapSet.new()}, fn conversation, {by_faction, duplicates} ->
+        key = faction_key(Map.get(conversation.metadata || %{}, "faction"))
 
-    configured_keys = MapSet.new(factions, &faction_key/1)
-
-    Enum.each(existing, fn conversation ->
-      key = faction_key(Map.get(conversation.metadata || %{}, "faction"))
-
-      if not MapSet.member?(configured_keys, key) do
-        _ = Chat.archive_conversation(conversation.id, game.host_id)
-      end
-    end)
-
-    faction_result =
-      Enum.reduce_while(factions, :ok, fn faction, :ok ->
-        member_ids =
-          if game.status not in [:day, :night] or
-               not GameRules.private_chat_allowed?(rules, game.status) do
-            []
-          else
-            players
-            |> Enum.filter(fn player ->
-              faction_key(player.alignment) == faction_key(faction) and
-                GameRules.capability?(game.ruleset, player, "private_chat")
-            end)
-            |> Enum.map(& &1.user_id)
-          end
-
-        member_ids = maybe_include_moderator(member_ids, game.host_id, rules)
-
-        case Map.get(existing_by_faction, faction_key(faction)) do
-          nil when member_ids == [] ->
-            {:cont, :ok}
-
-          nil ->
-            case Chat.create_group_conversation(game.host_id, member_ids,
-                   kind: :game,
-                   game_id: game.id,
-                   include_creator?: rules["private_chat_include_moderator"],
-                   title: "#{game_label(game)} — #{String.capitalize(faction)}",
-                   metadata: %{
-                     "mafia_game_id" => game.id,
-                     "moderator_id" => game.host_id,
-                     "channel" => "faction",
-                     "faction" => faction
-                   }
-                 ) do
-              {:ok, _conversation} -> {:cont, :ok}
-              {:error, reason} -> {:halt, {:error, reason}}
-            end
-
-          conversation ->
-            case Chat.sync_conversation_members(
-                   conversation.id,
-                   game.host_id,
-                   member_ids,
-                   preserve_actor?: false
-                 ) do
-              :ok -> {:cont, :ok}
-              {:error, reason} -> {:halt, {:error, reason}}
-            end
+        if Map.has_key?(by_faction, key) do
+          {by_faction, MapSet.put(duplicates, conversation.id)}
+        else
+          {Map.put(by_faction, key, conversation), duplicates}
         end
       end)
 
+    configured_keys = MapSet.new(factions, &faction_key(&1["key"]))
+
+    archive_result =
+      Enum.reduce_while(existing, :ok, fn conversation, :ok ->
+        key = faction_key(Map.get(conversation.metadata || %{}, "faction"))
+
+        if MapSet.member?(configured_keys, key) and
+             not MapSet.member?(duplicate_ids, conversation.id) do
+          {:cont, :ok}
+        else
+          case Chat.archive_conversation(conversation.id, game.host_id) do
+            {:ok, _archived} -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end
+      end)
+
+    faction_result =
+      case archive_result do
+        :ok ->
+          Enum.reduce_while(factions, :ok, fn faction, :ok ->
+            key = faction["key"]
+
+            member_ids =
+              if game.status not in [:day, :night] or
+                   not GameRules.faction_chat_allowed?(rules, key, game.status) do
+                []
+              else
+                players
+                |> Enum.filter(fn player ->
+                  faction_key(player.alignment) == faction_key(key) and
+                    GameRules.capability?(game.ruleset, player, "private_chat")
+                end)
+                |> Enum.map(& &1.user_id)
+              end
+
+            member_ids = maybe_include_moderator(member_ids, game.host_id, rules)
+
+            case Map.get(existing_by_faction, faction_key(key)) do
+              nil when member_ids == [] ->
+                {:cont, :ok}
+
+              nil ->
+                case Chat.create_group_conversation(game.host_id, member_ids,
+                       kind: :game,
+                       game_id: game.id,
+                       include_creator?: rules["private_chat_include_moderator"],
+                       title: "#{game_label(game)} — #{faction["name"]}",
+                       metadata: %{
+                         "mafia_game_id" => game.id,
+                         "moderator_id" => game.host_id,
+                         "channel" => "faction",
+                         "faction" => key
+                       }
+                     ) do
+                  {:ok, conversation} ->
+                    case maybe_set_mafia_conversation(game, key, conversation) do
+                      :ok -> {:cont, :ok}
+                      {:error, reason} -> {:halt, {:error, reason}}
+                    end
+
+                  {:error, reason} ->
+                    {:halt, {:error, reason}}
+                end
+
+              conversation ->
+                title = "#{game_label(game)} — #{faction["name"]}"
+
+                with {:ok, _renamed} <-
+                       Chat.rename_conversation(conversation.id, game.host_id, title),
+                     :ok <-
+                       Chat.sync_conversation_members(
+                         conversation.id,
+                         game.host_id,
+                         member_ids,
+                         preserve_actor?: false
+                       ),
+                     :ok <- maybe_set_mafia_conversation(game, key, conversation) do
+                  {:cont, :ok}
+                else
+                  {:error, reason} -> {:halt, {:error, reason}}
+                end
+            end
+          end)
+
+        {:error, _reason} = error ->
+          error
+      end
+
     with :ok <- faction_result do
       sync_side_chat_memberships(game, rules, players)
+    end
+  end
+
+  defp maybe_set_mafia_conversation(game, key, conversation) do
+    if faction_key(key) == "mafia" and game.mafia_chat_conversation_id != conversation.id do
+      game
+      |> Ash.Changeset.for_update(:update, %{mafia_chat_conversation_id: conversation.id})
+      |> Ash.update(authorize?: false)
+      |> case do
+        {:ok, _updated} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
     end
   end
 
@@ -1504,8 +1754,7 @@ defmodule Mafia.Games do
   defp normalize_faction(nil), do: nil
   defp normalize_faction(value), do: clean_optional_text(value, 100)
 
-  defp faction_key(nil), do: ""
-  defp faction_key(value), do: value |> to_string() |> String.trim() |> String.downcase()
+  defp faction_key(value), do: GameRules.canonical_faction_key(value)
 
   defp player_username(%MafiaPlayer{user: %Ash.NotLoaded{}}), do: "Player"
   defp player_username(%MafiaPlayer{user: nil}), do: "Player"
@@ -1628,10 +1877,11 @@ defmodule Mafia.Games do
 
   defp flip_text(game, player) do
     role = player.role_name || "an unknown role"
+    faction = GameRules.faction_name(game.ruleset, player.alignment) || "an unknown faction"
 
     case GameRules.normalize(game.ruleset)["reveal_on_death"] do
-      "alignment" -> "A player has died. They were #{player.alignment}."
-      _ -> "A player has died. They were #{role} (#{player.alignment})."
+      "alignment" -> "A player has died. They were #{faction}."
+      _ -> "A player has died. They were #{role} (#{faction})."
     end
   end
 

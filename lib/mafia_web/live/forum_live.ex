@@ -42,13 +42,10 @@ defmodule MafiaWeb.ForumLive do
     {:noreply, put_flash(socket, :error, "Sign in to reply.")}
   end
 
-  def handle_event("reply", %{"reply" => %{"body" => body} = attrs}, socket) do
-    case Chat.reply_to_forum_topic(
-           socket.assigns.topic.id,
-           socket.assigns.current_user.id,
-           body,
-           reply_to_message_id: socket.assigns.reply_to_message_id
-         ) do
+  def handle_event("reply", %{"reply" => attrs}, socket) do
+    attrs = Map.put(attrs, "reply_to_message_id", socket.assigns.reply_to_message_id)
+
+    case Chat.reply_to_forum_topic(socket.assigns.topic.id, socket.assigns.current_user.id, attrs) do
       {:ok, _message} ->
         {:noreply,
          socket
@@ -111,13 +108,15 @@ defmodule MafiaWeb.ForumLive do
             maxlength="160"
             required
           />
-          <.input
+          <.rich_text_input
+            id="topic-body"
             field={@topic_form[:body]}
-            type="textarea"
             label="Opening post"
-            rows="6"
+            rows={6}
             maxlength="10000"
-            required
+            gif_name={@topic_form[:gif_url].name}
+            gif_value={@topic_form[:gif_url].value || ""}
+            placeholder="Start the discussion…"
           />
           <.button variant="primary" phx-disable-with="Posting…">
             <.icon name="hero-plus" class="size-4" /> Start topic
@@ -201,6 +200,7 @@ defmodule MafiaWeb.ForumLive do
                 >
                   {message.user.username}
                 </.link>
+
                 <time
                   datetime={DateTime.to_iso8601(message.created_at)}
                   class="mono text-xs text-[color:var(--text-muted)]"
@@ -214,33 +214,21 @@ defmodule MafiaWeb.ForumLive do
                 class="mt-2 rounded-md border-l-2 border-[color:var(--border-strong)] bg-[color:var(--surface-2)] px-3 py-2 text-sm text-[color:var(--text-muted)]"
               >
                 <p class="font-medium text-[color:var(--text)]">{quoted.user.username}</p>
-                <p class="line-clamp-2 whitespace-pre-wrap">{quoted.body}</p>
+
+                <p class="line-clamp-2 whitespace-pre-wrap">{quoted_body(quoted)}</p>
               </blockquote>
 
-              <p class="mt-1 whitespace-pre-wrap leading-6">{message.body}</p>
+              <.message_body message={message} class="mt-1" />
               <p
                 :if={message.user.signature}
                 class="mt-3 whitespace-pre-wrap border-t border-[color:var(--border)] pt-2 text-xs text-[color:var(--text-muted)]"
               >
                 {message.user.signature}
               </p>
-              <div :if={@current_user} class="mt-2 flex flex-wrap gap-1">
+              <div class="mt-2 flex flex-wrap gap-1">
+                <.message_reactions message={message} current_user={@current_user} />
                 <button
-                  :for={emoji <- Chat.allowed_reactions()}
-                  type="button"
-                  phx-click="react"
-                  phx-value-message-id={message.id}
-                  phx-value-emoji={emoji}
-                  class={[
-                    "min-h-9 rounded-full border border-[color:var(--border)] px-2 text-xs",
-                    reacted?(message, @current_user.id, emoji) && "bg-[color:var(--surface-2)]"
-                  ]}
-                  aria-label={"React with #{emoji}; #{reaction_count(message, emoji)} reactions"}
-                  aria-pressed={reacted?(message, @current_user.id, emoji)}
-                >
-                  {emoji} {reaction_count(message, emoji)}
-                </button>
-                <button
+                  :if={@current_user}
                   type="button"
                   phx-click="quote_reply"
                   phx-value-message-id={message.id}
@@ -269,10 +257,12 @@ defmodule MafiaWeb.ForumLive do
         >
           <div class="min-w-0">
             <p class="font-medium">Replying to {quoted.user.username}</p>
+
             <p class="line-clamp-2 whitespace-pre-wrap text-[color:var(--text-muted)]">
-              {quoted.body}
+              {quoted_body(quoted)}
             </p>
           </div>
+
           <button
             type="button"
             phx-click="cancel_reply"
@@ -282,22 +272,24 @@ defmodule MafiaWeb.ForumLive do
             <.icon name="hero-x-mark" class="size-4" />
           </button>
         </div>
+
         <input
           type="hidden"
           name="reply[reply_to_message_id]"
           value={@reply_to_message_id || ""}
         />
-        <.input
+        <.rich_text_input
+          id="reply-body"
           field={@reply_form[:body]}
-          type="textarea"
           label="Reply"
-          rows="5"
+          rows={5}
           maxlength="10000"
+          gif_name={@reply_form[:gif_url].name}
+          gif_value={@reply_form[:gif_url].value || ""}
           placeholder={
             if @topic.is_read_only, do: "Topic is read-only", else: "Add to the discussion…"
           }
           disabled={@topic.is_read_only}
-          required
         />
         <.button
           variant="primary"
@@ -368,21 +360,23 @@ defmodule MafiaWeb.ForumLive do
     end
   end
 
-  defp topic_form(attrs \\ %{"title" => "", "body" => ""}),
+  defp topic_form(attrs \\ %{"title" => "", "body" => "", "gif_url" => ""}),
     do: to_form(attrs, as: :topic)
 
-  defp reply_form(attrs \\ %{"body" => ""}), do: to_form(attrs, as: :reply)
+  defp reply_form(attrs \\ %{"body" => "", "gif_url" => ""}), do: to_form(attrs, as: :reply)
 
-  defp reacted?(message, user_id, emoji),
-    do: Enum.any?(message.reactions, &(&1.user_id == user_id and &1.emoji == emoji))
+  defp quoted_body(%{body: body}) when is_binary(body) and body != "", do: body
 
-  defp reaction_count(message, emoji), do: Enum.count(message.reactions, &(&1.emoji == emoji))
+  defp quoted_body(%{attachments: attachments}) do
+    if Enum.any?(attachments, &(&1["type"] == "gif")), do: "GIF attachment", else: "Attachment"
+  end
 
   defp forum_error(:empty_title), do: "Add a topic title."
   defp forum_error(:title_too_long), do: "Keep the title under 160 characters."
-  defp forum_error(:empty_message), do: "Write a message first."
+  defp forum_error(:empty_message), do: "Write a message or attach a GIF first."
   defp forum_error(:message_too_long), do: "Keep posts under 10,000 characters."
   defp forum_error(:reply_not_found), do: "That message is no longer available."
+  defp forum_error(:invalid_gif), do: "Use a direct HTTPS URL ending in .gif."
   defp forum_error(:read_only), do: "This topic is read-only."
   defp forum_error(:muted), do: "You cannot post or react right now."
   defp forum_error(:rate_limited), do: "Slow down and try again in a moment."

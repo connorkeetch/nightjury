@@ -76,6 +76,151 @@ defmodule Mafia.GameRulesTest do
     assert rules["day_length_seconds"] == 86_400
   end
 
+  test "factions normalize into stable assignment options with independent room schedules" do
+    rules =
+      GameRules.from_form(
+        %{
+          "factions" => %{
+            "0" => %{"key" => "town", "name" => "The Village", "chat_policy" => "disabled"},
+            "1" => %{"key" => "mafia", "name" => "The Family", "chat_policy" => "always"},
+            "2" => %{"key" => "mafia", "name" => "Duplicate", "chat_policy" => "day"}
+          }
+        },
+        GameRules.default()
+      )
+
+    assert GameRules.faction_options(rules) == [
+             {"The Village", "town"},
+             {"The Family", "mafia"}
+           ]
+
+    assert rules["private_factions"] == ["mafia"]
+    assert GameRules.faction_name(rules, "mafia") == "The Family"
+    assert GameRules.faction_chat_allowed?(rules, "mafia", :day)
+    assert GameRules.faction_chat_allowed?(rules, "mafia", :night)
+    refute GameRules.faction_chat_allowed?(rules, "town", :night)
+  end
+
+  test "legacy faction room settings upgrade idempotently" do
+    legacy = %{
+      "schema_version" => 2,
+      "private_factions" => ["mafia", "pale horse"],
+      "private_chat_policy" => "night"
+    }
+
+    rules = GameRules.normalize(legacy)
+
+    assert rules["schema_version"] == 3
+    assert GameRules.faction_name(rules, "Pale Horse") == "Pale Horse"
+    assert GameRules.faction_chat_allowed?(rules, "pale horse", :night)
+    refute GameRules.faction_chat_allowed?(rules, "pale horse", :day)
+    assert GameRules.normalize(rules) == rules
+  end
+
+  test "partial version two rules retain the legacy Mafia room policy" do
+    rules =
+      GameRules.normalize(%{
+        "schema_version" => 2,
+        "private_chat_policy" => "disabled"
+      })
+
+    refute GameRules.faction_chat_allowed?(rules, "mafia", :day)
+    refute GameRules.faction_chat_allowed?(rules, "mafia", :night)
+  end
+
+  test "legacy faction identities do not collapse punctuation variants" do
+    rules =
+      GameRules.normalize(%{
+        "schema_version" => 2,
+        "private_factions" => ["red team", "red-team"],
+        "private_chat_policy" => "always"
+      })
+
+    assert "red team" in rules["private_factions"]
+    assert "red-team" in rules["private_factions"]
+    assert GameRules.faction(rules, "red team")["key"] == "red team"
+    assert GameRules.faction(rules, "red-team")["key"] == "red-team"
+  end
+
+  test "legacy normalization does not silently discard large faction lists" do
+    private_factions = Enum.map(1..21, &"legacy faction #{&1}")
+
+    rules =
+      GameRules.normalize(%{
+        "schema_version" => 2,
+        "private_factions" => private_factions,
+        "private_chat_policy" => "night"
+      })
+
+    assert GameRules.faction(rules, "legacy faction 21")["name"] == "Legacy Faction 21"
+  end
+
+  test "common role suggestions stay editable rather than defining mechanics" do
+    roles = GameRules.common_roles()
+
+    assert "Doctor" in roles
+    assert "Investigator" in roles
+    assert "Shooter" in roles
+  end
+
+  test "classic victory restores its canonical Town and Mafia factions" do
+    rules =
+      GameRules.normalize(%{
+        "schema_version" => 3,
+        "win_mode" => "classic",
+        "factions" => [
+          %{"key" => "cult", "name" => "Cult", "chat_policy" => "always"}
+        ]
+      })
+
+    assert GameRules.faction_name(rules, "town") == "Town"
+    assert GameRules.faction_name(rules, "mafia") == "Mafia"
+  end
+
+  test "classic factions preserve additional definitions and edited canonical definitions" do
+    customs =
+      for index <- 1..20 do
+        %{
+          "key" => "custom-#{index}",
+          "name" => "Custom #{index}",
+          "chat_policy" => "disabled"
+        }
+      end
+
+    rules =
+      GameRules.normalize(%{
+        "schema_version" => 3,
+        "win_mode" => "classic",
+        "factions" =>
+          customs ++
+            [
+              %{"key" => "town", "name" => "Village", "chat_policy" => "disabled"},
+              %{"key" => "mafia", "name" => "Family", "chat_policy" => "always"}
+            ]
+      })
+
+    assert length(GameRules.factions(rules)) == 22
+    assert GameRules.faction_name(rules, "town") == "Village"
+    assert GameRules.faction_name(rules, "mafia") == "Family"
+    assert GameRules.faction_name(rules, "custom-20") == "Custom 20"
+  end
+
+  test "duplicate display names are disambiguated in assignment options" do
+    rules =
+      GameRules.normalize(%{
+        "win_mode" => "moderator",
+        "factions" => [
+          %{"key" => "town", "name" => "Town"},
+          %{"key" => "faction-custom", "name" => "town"}
+        ]
+      })
+
+    assert GameRules.faction_options(rules) == [
+             {"Town (town)", "town"},
+             {"town (faction-custom)", "faction-custom"}
+           ]
+  end
+
   test "only one day ballot can claim the automatic elimination effect" do
     duplicate =
       GameRules.new_ballot()
