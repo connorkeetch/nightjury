@@ -395,7 +395,7 @@ defmodule Mafia.Chat do
          {:ok, %{rows: [[content_type, data]]}} <-
            Repo.query(
              "SELECT content_type, data FROM message_images WHERE id = $1::uuid AND message_id = $2::uuid",
-             [image_id, message.id]
+             [Ecto.UUID.dump!(image_id), Ecto.UUID.dump!(message.id)]
            ) do
       {:ok, %{content_type: content_type, data: data}}
     else
@@ -464,7 +464,7 @@ defmodule Mafia.Chat do
                      SELECT id FROM messages WHERE conversation_id = $1::uuid
                    )
                    """,
-                   [conversation_id]
+                   [Ecto.UUID.dump!(conversation_id)]
                  ) do
             updated
           else
@@ -1173,7 +1173,7 @@ defmodule Mafia.Chat do
   defp lock_open_conversation(conversation_id) do
     case Repo.query(
            "SELECT is_archived FROM conversations WHERE id = $1::uuid FOR UPDATE",
-           [conversation_id]
+           [Ecto.UUID.dump!(conversation_id)]
          ) do
       {:ok, %{rows: [[false]]}} -> :ok
       {:ok, _result} -> {:error, :archived}
@@ -1196,7 +1196,7 @@ defmodule Mafia.Chat do
              JOIN messages message ON message.id = image.message_id
              WHERE message.user_id = $1::uuid
              """,
-             [user_id]
+             [Ecto.UUID.dump!(user_id)]
            ),
          true <- used_bytes + new_bytes <= @image_storage_quota_bytes do
       insert_message_images(message_id, attachments)
@@ -1214,8 +1214,8 @@ defmodule Mafia.Chat do
              VALUES ($1::uuid, $2::uuid, $3, $4, now())
              """,
              [
-               attachment["id"],
-               message_id,
+               Ecto.UUID.dump!(attachment["id"]),
+               Ecto.UUID.dump!(message_id),
                attachment["content_type"],
                attachment["data"]
              ]
