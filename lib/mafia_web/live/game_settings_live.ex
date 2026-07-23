@@ -20,6 +20,7 @@ defmodule MafiaWeb.GameSettingsLive do
          |> assign(:draft_rules, rules)
          |> assign(:change_summary, "")
          |> assign(:statuses, GameRules.statuses())
+         |> assign(:max_additional_factions, @max_additional_factions)
          |> assign(:capabilities, GameRules.capabilities())}
 
       {:ok, game} ->
