@@ -14,8 +14,10 @@ defmodule MafiaWeb.ForumLive do
      |> assign(:topic, nil)
      |> assign(:topics, Chat.list_forum_topics())
      |> assign(:messages, [])
+     |> assign(:message_lookup, %{})
      |> assign(:topic_form, topic_form())
-     |> assign(:reply_form, reply_form())}
+     |> assign(:reply_form, reply_form())
+     |> assign(:reply_to_message_id, nil)}
   end
 
   @impl true
@@ -41,9 +43,18 @@ defmodule MafiaWeb.ForumLive do
   end
 
   def handle_event("reply", %{"reply" => %{"body" => body} = attrs}, socket) do
-    case Chat.reply_to_forum_topic(socket.assigns.topic.id, socket.assigns.current_user.id, body) do
+    case Chat.reply_to_forum_topic(
+           socket.assigns.topic.id,
+           socket.assigns.current_user.id,
+           body,
+           reply_to_message_id: socket.assigns.reply_to_message_id
+         ) do
       {:ok, _message} ->
-        {:noreply, socket |> assign(:reply_form, reply_form()) |> refresh_topic()}
+        {:noreply,
+         socket
+         |> assign(:reply_form, reply_form())
+         |> assign(:reply_to_message_id, nil)
+         |> refresh_topic()}
 
       {:error, reason} ->
         {:noreply,
@@ -51,6 +62,18 @@ defmodule MafiaWeb.ForumLive do
          |> assign(:reply_form, to_form(attrs, as: :reply))
          |> put_flash(:error, forum_error(reason))}
     end
+  end
+
+  def handle_event("quote_reply", %{"message-id" => message_id}, socket) do
+    if Map.has_key?(socket.assigns.message_lookup, message_id) do
+      {:noreply, assign(socket, :reply_to_message_id, message_id)}
+    else
+      {:noreply, put_flash(socket, :error, forum_error(:reply_not_found))}
+    end
+  end
+
+  def handle_event("cancel_reply", _params, socket) do
+    {:noreply, assign(socket, :reply_to_message_id, nil)}
   end
 
   def handle_event("react", _params, %{assigns: %{current_user: nil}} = socket) do
@@ -80,6 +103,7 @@ defmodule MafiaWeb.ForumLive do
 
       <div :if={@current_user} class="panel">
         <p class="eyebrow">Open a discussion</p>
+
         <.form for={@topic_form} id="new-forum-topic" phx-submit="create_topic" class="mt-4 space-y-4">
           <.input
             field={@topic_form[:title]}
@@ -111,7 +135,9 @@ defmodule MafiaWeb.ForumLive do
           <span class="empty-state-icon" aria-hidden="true">
             <.icon name="hero-chat-bubble-left-right" class="size-6" />
           </span>
+
           <p class="font-semibold text-[color:var(--text)]">No discussions yet</p>
+
           <p class="mt-1 text-sm">Start the first post-game conversation.</p>
         </div>
       </div>
@@ -124,6 +150,7 @@ defmodule MafiaWeb.ForumLive do
         >
           <div class="min-w-0">
             <p class="truncate font-semibold text-[color:var(--text)]">{topic.title}</p>
+
             <p class="mt-1 text-sm text-[color:var(--text-muted)]">
               Started by {topic.creator.username} · {Calendar.strftime(topic.created_at, "%b %-d, %Y")}
             </p>
@@ -142,12 +169,16 @@ defmodule MafiaWeb.ForumLive do
         <.link navigate="/forums" class="btn btn-quiet" aria-label="Back to forums">
           <.icon name="hero-arrow-left" class="size-4" />
         </.link>
+
         <div class="min-w-0">
           <p class="eyebrow">Forum topic</p>
+
           <h1 class="section-heading mt-1">{@topic.title}</h1>
+
           <p class="mt-2 text-sm text-[color:var(--text-muted)]">
             Started by {@topic.creator.username}
           </p>
+
           <p :if={@topic.is_read_only} class="mt-2 text-sm text-[color:var(--warning-text)]">
             This topic is read-only.
           </p>
@@ -160,37 +191,66 @@ defmodule MafiaWeb.ForumLive do
           id={"message-#{message.id}"}
           class="border-b border-[color:var(--border)] pb-5 last:border-0 last:pb-0"
         >
-          <div class="flex items-baseline gap-2">
-            <.link
-              navigate={~p"/users/#{message.user.username}"}
-              class="font-semibold text-[color:var(--text)]"
-            >
-              {message.user.username}
-            </.link>
-            <time
-              datetime={DateTime.to_iso8601(message.created_at)}
-              class="mono text-xs text-[color:var(--text-muted)]"
-            >
-              {Calendar.strftime(message.created_at, "%b %-d, %H:%M")}
-            </time>
-          </div>
-          <p class="mt-1 whitespace-pre-wrap leading-6">{message.body}</p>
-          <div :if={@current_user} class="mt-2 flex flex-wrap gap-1">
-            <button
-              :for={emoji <- Chat.allowed_reactions()}
-              type="button"
-              phx-click="react"
-              phx-value-message-id={message.id}
-              phx-value-emoji={emoji}
-              class={[
-                "min-h-9 rounded-full border border-[color:var(--border)] px-2 text-xs",
-                reacted?(message, @current_user.id, emoji) && "bg-[color:var(--surface-2)]"
-              ]}
-              aria-label={"React with #{emoji}; #{reaction_count(message, emoji)} reactions"}
-              aria-pressed={reacted?(message, @current_user.id, emoji)}
-            >
-              {emoji} {reaction_count(message, emoji)}
-            </button>
+          <div class="flex items-start gap-3">
+            <.user_avatar user={message.user} class="size-9 text-xs" />
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-baseline gap-2">
+                <.link
+                  navigate={~p"/users/#{message.user.username}"}
+                  class="font-semibold text-[color:var(--text)]"
+                >
+                  {message.user.username}
+                </.link>
+                <time
+                  datetime={DateTime.to_iso8601(message.created_at)}
+                  class="mono text-xs text-[color:var(--text-muted)]"
+                >
+                  {Calendar.strftime(message.created_at, "%b %-d, %H:%M")}
+                </time>
+              </div>
+
+              <blockquote
+                :if={quoted = Map.get(@message_lookup, message.reply_to_message_id)}
+                class="mt-2 rounded-md border-l-2 border-[color:var(--border-strong)] bg-[color:var(--surface-2)] px-3 py-2 text-sm text-[color:var(--text-muted)]"
+              >
+                <p class="font-medium text-[color:var(--text)]">{quoted.user.username}</p>
+                <p class="line-clamp-2 whitespace-pre-wrap">{quoted.body}</p>
+              </blockquote>
+
+              <p class="mt-1 whitespace-pre-wrap leading-6">{message.body}</p>
+              <p
+                :if={message.user.signature}
+                class="mt-3 whitespace-pre-wrap border-t border-[color:var(--border)] pt-2 text-xs text-[color:var(--text-muted)]"
+              >
+                {message.user.signature}
+              </p>
+              <div :if={@current_user} class="mt-2 flex flex-wrap gap-1">
+                <button
+                  :for={emoji <- Chat.allowed_reactions()}
+                  type="button"
+                  phx-click="react"
+                  phx-value-message-id={message.id}
+                  phx-value-emoji={emoji}
+                  class={[
+                    "min-h-9 rounded-full border border-[color:var(--border)] px-2 text-xs",
+                    reacted?(message, @current_user.id, emoji) && "bg-[color:var(--surface-2)]"
+                  ]}
+                  aria-label={"React with #{emoji}; #{reaction_count(message, emoji)} reactions"}
+                  aria-pressed={reacted?(message, @current_user.id, emoji)}
+                >
+                  {emoji} {reaction_count(message, emoji)}
+                </button>
+                <button
+                  type="button"
+                  phx-click="quote_reply"
+                  phx-value-message-id={message.id}
+                  class="min-h-9 rounded-full border border-[color:var(--border)] px-3 text-xs"
+                  aria-label={"Reply to #{message.user.username}"}
+                >
+                  <.icon name="hero-arrow-uturn-left" class="size-3.5" /> Reply
+                </button>
+              </div>
+            </div>
           </div>
         </article>
       </div>
@@ -202,6 +262,31 @@ defmodule MafiaWeb.ForumLive do
         phx-submit="reply"
         class="space-y-3"
       >
+        <div
+          :if={quoted = Map.get(@message_lookup, @reply_to_message_id)}
+          id="forum-reply-preview"
+          class="flex items-start justify-between gap-3 rounded-lg border border-[color:var(--border)] bg-[color:var(--surface-2)] px-3 py-2 text-sm"
+        >
+          <div class="min-w-0">
+            <p class="font-medium">Replying to {quoted.user.username}</p>
+            <p class="line-clamp-2 whitespace-pre-wrap text-[color:var(--text-muted)]">
+              {quoted.body}
+            </p>
+          </div>
+          <button
+            type="button"
+            phx-click="cancel_reply"
+            class="min-h-9 min-w-9 rounded-md"
+            aria-label="Cancel reply"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+        <input
+          type="hidden"
+          name="reply[reply_to_message_id]"
+          value={@reply_to_message_id || ""}
+        />
         <.input
           field={@reply_form[:body]}
           type="textarea"
@@ -264,8 +349,10 @@ defmodule MafiaWeb.ForumLive do
        |> assign(:topic, topic)
        |> assign(:topics, [])
        |> assign(:messages, messages)
-       |> assign(:topic_form, topic_form())
-       |> assign(:reply_form, reply_form())}
+       |> assign(:message_lookup, Map.new(messages, &{&1.id, &1}))
+       |> assign_new(:topic_form, &topic_form/0)
+       |> assign_new(:reply_form, &reply_form/0)
+       |> assign_new(:reply_to_message_id, fn -> nil end)}
     else
       _ ->
         {:error,
@@ -274,8 +361,10 @@ defmodule MafiaWeb.ForumLive do
          |> assign(:topic, nil)
          |> assign(:topics, [])
          |> assign(:messages, [])
-         |> assign(:topic_form, topic_form())
-         |> assign(:reply_form, reply_form())}
+         |> assign(:message_lookup, %{})
+         |> assign_new(:topic_form, &topic_form/0)
+         |> assign_new(:reply_form, &reply_form/0)
+         |> assign_new(:reply_to_message_id, fn -> nil end)}
     end
   end
 
@@ -293,6 +382,7 @@ defmodule MafiaWeb.ForumLive do
   defp forum_error(:title_too_long), do: "Keep the title under 160 characters."
   defp forum_error(:empty_message), do: "Write a message first."
   defp forum_error(:message_too_long), do: "Keep posts under 10,000 characters."
+  defp forum_error(:reply_not_found), do: "That message is no longer available."
   defp forum_error(:read_only), do: "This topic is read-only."
   defp forum_error(:muted), do: "You cannot post or react right now."
   defp forum_error(:rate_limited), do: "Slow down and try again in a moment."

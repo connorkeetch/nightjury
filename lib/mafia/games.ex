@@ -44,6 +44,10 @@ defmodule Mafia.Games do
     Phoenix.PubSub.broadcast(Mafia.PubSub, topic(game_id), message)
   end
 
+  defp refresh_lobby do
+    Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
+  end
+
   # ============================================================================
   # Game lifecycle
   # ============================================================================
@@ -80,7 +84,7 @@ defmodule Mafia.Games do
 
       case result do
         {:ok, game} ->
-          _ = Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
+          _ = refresh_lobby()
           {:ok, game}
 
         {:error, error} ->
@@ -188,26 +192,32 @@ defmodule Mafia.Games do
     |> Enum.filter(&(lobby_type(&1) == "open"))
   end
 
+  @doc "Games a user hosts or has a seat in, including started and finished games."
+  def list_user_games(user_id) do
+    hosted =
+      MafiaGame
+      |> Ash.Query.filter(host_id == ^user_id)
+      |> Ash.read!(authorize?: false)
+
+    joined =
+      MafiaPlayer
+      |> Ash.Query.filter(user_id == ^user_id)
+      |> Ash.Query.load(:mafia_game)
+      |> Ash.read!(authorize?: false)
+      |> Enum.map(& &1.mafia_game)
+
+    (hosted ++ joined)
+    |> Enum.uniq_by(& &1.id)
+    |> Enum.sort_by(& &1.updated_at, {:desc, DateTime})
+  end
+
   @doc """
-  Deletes a game (host only). Archives the reused chat conversations and purges
-  the game's children (which have no ON DELETE CASCADE) before destroying it.
-  Works at any stage; mainly used to clean up un-started lobbies.
+  Deletes a game (host only). Database cascades remove the game's child records,
+  then the reused chat conversations are archived. Works at any stage.
   """
   def delete_game(%MafiaGame{} = game, host_id) do
     with :ok <- WriteGate.ensure_enabled(),
          :ok <- authorize_host(game, host_id) do
-      # Purge children first — votes/night-actions reference players, so they go
-      # before players, and players before the game.
-      _ =
-        for resource <- [MafiaNightAction, MafiaVote, MafiaPlayer] do
-          _ =
-            resource
-            |> Ash.Query.filter(mafia_game_id == ^game.id)
-            |> Ash.bulk_destroy!(:destroy, %{}, authorize?: false)
-        end
-
-      # Only archive the chats and announce the deletion once the game is gone,
-      # so a failed destroy can't leave an archived-but-still-present game.
       case Ash.destroy(game, authorize?: false) do
         {:error, _} = err ->
           err
@@ -219,7 +229,7 @@ defmodule Mafia.Games do
             end
 
           _ = broadcast(game.id, :game_deleted)
-          _ = Phoenix.PubSub.broadcast(Mafia.PubSub, "mafia:lobby", :games_changed)
+          _ = refresh_lobby()
           :ok
       end
     end
@@ -277,7 +287,10 @@ defmodule Mafia.Games do
           MafiaPlayer
           |> Ash.Changeset.for_create(:create, %{mafia_game_id: game.id, user_id: user_id})
           |> Ash.create(authorize?: false)
-          |> tap_ok(fn _ -> broadcast(game.id, :roster_changed) end)
+          |> tap_ok(fn _ ->
+            _ = broadcast(game.id, :roster_changed)
+            _ = refresh_lobby()
+          end)
         end
 
       {:error, _} = err ->
@@ -311,10 +324,12 @@ defmodule Mafia.Games do
     case Ash.destroy(player, authorize?: false) do
       :ok ->
         _ = broadcast(game.id, :roster_changed)
+        _ = refresh_lobby()
         :ok
 
       {:ok, _} ->
         _ = broadcast(game.id, :roster_changed)
+        _ = refresh_lobby()
         :ok
 
       other ->
@@ -666,6 +681,7 @@ defmodule Mafia.Games do
       post_system(game, "Day 1 begins. Discuss, and vote to lynch.")
       schedule_phase_timer(game)
       _ = broadcast(game.id, {:phase_changed, game})
+      _ = refresh_lobby()
 
       notify_phase(
         game,
@@ -731,6 +747,7 @@ defmodule Mafia.Games do
 
   defp publish_resolved_day(game) do
     _ = broadcast(game.id, {:phase_changed, game})
+    _ = refresh_lobby()
 
     game.id
     |> Chat.list_game_conversations()
@@ -783,6 +800,7 @@ defmodule Mafia.Games do
       post_system(game, "Dawn breaks on Day #{day_number(game)}.")
       schedule_phase_timer(game)
       _ = broadcast(game.id, {:phase_changed, game})
+      _ = refresh_lobby()
       notify_phase(game, "Mafia — Day #{day_number(game)}", "Dawn breaks. The day phase is open.")
       {:ok, game}
     end
@@ -966,6 +984,7 @@ defmodule Mafia.Games do
       _ = sync_private_faction_chats(game)
       post_system(game, "Game over — the #{faction} win.")
       _ = broadcast(game.id, {:phase_changed, game})
+      _ = refresh_lobby()
       notify_phase(game, "Mafia — game over", "The #{faction} win #{game_label(game)}.")
       {:ok, game}
     end

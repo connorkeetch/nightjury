@@ -21,11 +21,15 @@ defmodule Mafia.AccountsTest do
              Accounts.update_profile(user, %{
                bio: "Runs patient games.",
                tagline: "Trust no one",
-               avatar_url: "https://example.com/avatar.png"
+               avatar_url: "https://example.com/avatar.png",
+               signature: "— ModeratorOne"
              })
 
     assert updated.bio == "Runs patient games."
-    assert Accounts.get_user_by_username("MODERATORONE").id == user.id
+    assert updated.signature == "— ModeratorOne"
+    reloaded = Accounts.get_user_by_username("MODERATORONE")
+    assert reloaded.id == user.id
+    assert reloaded.signature == "— ModeratorOne"
   end
 
   test "rejects a wrong password" do

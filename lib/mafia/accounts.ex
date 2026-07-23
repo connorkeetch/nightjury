@@ -87,7 +87,8 @@ defmodule Mafia.Accounts do
     profile = %{
       bio: blank_to_nil(value(attrs, :bio)),
       tagline: blank_to_nil(value(attrs, :tagline)),
-      avatar_url: blank_to_nil(value(attrs, :avatar_url))
+      avatar_url: blank_to_nil(value(attrs, :avatar_url)),
+      signature: blank_to_nil(value(attrs, :signature))
     }
 
     with :ok <- Mafia.WriteGate.ensure_enabled() do
