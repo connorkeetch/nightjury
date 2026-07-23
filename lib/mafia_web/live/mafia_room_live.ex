@@ -6,7 +6,7 @@ defmodule MafiaWeb.MafiaRoomLive do
   """
   use MafiaWeb, :live_view
 
-  alias Mafia.{Chat, GameRules, Games}
+  alias Mafia.{Accounts, Chat, GameRules, Games}
   import MafiaWeb.GameComponents
 
   @impl true
@@ -19,7 +19,12 @@ defmodule MafiaWeb.MafiaRoomLive do
           :timer.send_interval(30_000, self(), :tick)
         end
 
-        {:ok, socket |> assign(:game_id, id) |> assign(:now, DateTime.utc_now()) |> refresh()}
+        {:ok,
+         socket
+         |> assign(:game_id, id)
+         |> assign(:now, DateTime.utc_now())
+         |> assign(:user_suggestions, [])
+         |> refresh()}
 
       {:error, _} ->
         {:ok,
@@ -143,6 +148,10 @@ defmodule MafiaWeb.MafiaRoomLive do
     end
   end
 
+  def handle_event("suggest_users", %{"name" => query}, socket) do
+    {:noreply, assign(socket, :user_suggestions, Accounts.search_users(query))}
+  end
+
   def handle_event("add_player", %{"name" => name}, socket) do
     handle_result(
       Games.add_player_by_name(socket.assigns.game, socket.assigns.current_user.id, name),
@@ -178,6 +187,7 @@ defmodule MafiaWeb.MafiaRoomLive do
       status: attrs["status"],
       alignment: blank_to_nil(attrs["alignment"]),
       role_name: blank_to_nil(attrs["role_name"]),
+      role_pm_body: blank_to_nil(attrs["role_pm_body"]),
       tags: parse_tags(attrs["tags"]),
       capability_overrides: overrides
     }
@@ -407,7 +417,9 @@ defmodule MafiaWeb.MafiaRoomLive do
               <h2 class="mt-1 font-[family-name:var(--font-display)] text-2xl font-bold text-[color:var(--text)]">
                 {@my_player.role_name}
               </h2>
-              <span class="status-chip status-chip-wax mt-2">{@my_player.alignment}</span>
+              <span class="status-chip status-chip-wax mt-2">
+                {faction_label(@game, @my_player.alignment)}
+              </span>
             </div>
           </div>
 
@@ -419,6 +431,9 @@ defmodule MafiaWeb.MafiaRoomLive do
           </p>
         </section>
       <% end %>
+      <datalist id="common-role-presets">
+        <option :for={role <- GameRules.common_roles()} value={role}></option>
+      </datalist>
       {render_body(assigns)}
     </div>
     """
@@ -428,7 +443,7 @@ defmodule MafiaWeb.MafiaRoomLive do
     do: "Waiting for the moderator"
 
   defp status_line(%{game: %{status: :finished} = g}),
-    do: "The #{g.winner_faction} win"
+    do: "The #{GameRules.faction_name(g.ruleset, g.winner_faction) || g.winner_faction} win"
 
   defp status_line(%{game: g} = assigns) do
     left = time_left(g.phase_ends_at, assigns[:now] || DateTime.utc_now())
@@ -517,16 +532,27 @@ defmodule MafiaWeb.MafiaRoomLive do
           Seat someone directly using their username or email.
         </p>
 
-        <form phx-submit="add_player" class="mt-4 flex flex-col gap-2 sm:flex-row">
+        <form
+          id="add-player-form"
+          phx-change="suggest_users"
+          phx-submit="add_player"
+          class="mt-4 flex flex-col gap-2 sm:flex-row"
+        >
           <label for="player-name" class="sr-only">Username or email</label>
           <input
             id="player-name"
             type="text"
             name="name"
             placeholder="Username or email"
+            autocomplete="off"
+            list="player-user-suggestions"
+            phx-debounce="200"
             required
             class={[input_class(), "min-w-0 flex-1"]}
           />
+          <datalist id="player-user-suggestions">
+            <option :for={user <- @user_suggestions} value={user.username}></option>
+          </datalist>
           <button type="submit" class={btn_secondary()} phx-disable-with="Adding…">
             <.icon name="hero-user-plus" class="size-4" /> Add player
           </button>
@@ -542,50 +568,50 @@ defmodule MafiaWeb.MafiaRoomLive do
             <h2 class="section-heading">Prepare the cast</h2>
 
             <p class="mt-1 text-sm leading-6 text-[color:var(--text-muted)]">
-              Every player needs an alignment. Role names and private instructions are yours to write.
+              Choose a configured faction, then pick a common role or type any custom role.
+              Private instructions remain yours to write.
             </p>
           </div>
 
-          <div
+          <fieldset
             :for={p <- @game.players}
             class="space-y-2 border-b border-[color:var(--border)] pb-4 last:border-b-0"
           >
-            <p class="text-sm font-semibold text-[color:var(--text)]">{user_name(p.user)}</p>
+            <legend class="text-sm font-semibold text-[color:var(--text)]">
+              {user_name(p.user)}
+            </legend>
 
-            <div class="grid grid-cols-1 gap-2 sm:grid-cols-[9rem_1fr]">
-              <label>
-                <span class="sr-only">Alignment for {user_name(p.user)}</span>
-                <input
-                  type="text"
-                  name={"roles[#{p.id}][alignment]"}
-                  value={p.alignment}
-                  placeholder="Faction (for example, town)"
-                  required
-                  class={input_class()}
-                />
-              </label>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <.input
+                type="select"
+                name={"roles[#{p.id}][alignment]"}
+                label="Faction"
+                value={selected_faction(@rules, p.alignment)}
+                prompt="Choose faction"
+                options={faction_options(@rules, p.alignment)}
+                required
+              />
 
-              <label>
-                <span class="sr-only">Role for {user_name(p.user)}</span>
-                <input
-                  type="text"
-                  name={"roles[#{p.id}][role_name]"}
-                  value={p.role_name}
-                  placeholder="Role (for example, Detective)"
-                  class={input_class()}
-                />
-              </label>
+              <.input
+                name={"roles[#{p.id}][role_name]"}
+                label="Role"
+                value={p.role_name}
+                list="common-role-presets"
+                maxlength="100"
+                placeholder="Choose a preset or type a custom role"
+              />
             </div>
 
-            <label class="block">
-              <span class="sr-only">Private role message for {user_name(p.user)}</span> <textarea
-                name={"roles[#{p.id}][pm]"}
-                rows="2"
-                placeholder="Role PM (optional) — shown only to this player"
-                class={[input_class(), "w-full"]}
-              >{p.role_pm_body}</textarea>
-            </label>
-          </div>
+            <.input
+              type="textarea"
+              name={"roles[#{p.id}][pm]"}
+              label="Private role message"
+              value={p.role_pm_body}
+              rows="2"
+              maxlength="5000"
+              placeholder="Optional instructions shown only to this player"
+            />
+          </fieldset>
 
           <div class="flex flex-col gap-3 border-t border-[color:var(--border)] pt-4 sm:flex-row sm:items-center">
             <button type="submit" class={btn_secondary()} phx-disable-with="Saving…">
@@ -719,7 +745,7 @@ defmodule MafiaWeb.MafiaRoomLive do
         <li :for={p <- @game.players} class="flex min-h-14 items-center justify-between gap-4 py-2">
           <span class="font-semibold text-[color:var(--text)]">{user_name(p.user)}</span>
           <span class="text-right text-sm text-[color:var(--text-muted)]">
-            {p.role_name || "—"} ({p.alignment || "no faction"}) · {player_status_label(p)}
+            {p.role_name || "—"} ({faction_label(@game, p.alignment)}) · {player_status_label(p)}
           </span>
         </li>
       </ul>
@@ -763,7 +789,7 @@ defmodule MafiaWeb.MafiaRoomLive do
               :if={@is_host || @game.status == :finished}
               class="text-xs text-[color:var(--text-muted)]"
             >
-              {player.alignment || "No faction"}
+              {faction_label(@game, player.alignment)}
             </span>
             <span class="status-chip">{player_status_label(player)}</span>
           </span>
@@ -1064,16 +1090,20 @@ defmodule MafiaWeb.MafiaRoomLive do
                   ]}
                 />
                 <.input
+                  type="select"
                   name="player[alignment]"
                   label="Faction"
-                  value={player.alignment}
-                  maxlength="100"
+                  value={selected_faction(@game.ruleset, player.alignment)}
+                  prompt="Choose faction"
+                  options={faction_options(@game.ruleset, player.alignment)}
                 />
                 <.input
                   name="player[role_name]"
                   label="Role"
                   value={player.role_name}
+                  list="common-role-presets"
                   maxlength="100"
+                  placeholder="Choose a preset or type a custom role"
                 />
                 <.input
                   name="player[tags]"
@@ -1081,6 +1111,17 @@ defmodule MafiaWeb.MafiaRoomLive do
                   value={Enum.join(player.tags || [], ", ")}
                   placeholder="infected, president, immune"
                 />
+                <div class="sm:col-span-2">
+                  <.input
+                    type="textarea"
+                    name="player[role_pm_body]"
+                    label="Private role message"
+                    value={player.role_pm_body}
+                    rows="3"
+                    maxlength="5000"
+                    placeholder="Optional instructions shown only to this player"
+                  />
+                </div>
               </div>
 
               <fieldset>
@@ -1119,7 +1160,10 @@ defmodule MafiaWeb.MafiaRoomLive do
             class="flex min-h-14 flex-wrap items-center justify-between gap-2 py-2 text-sm"
           >
             <span class="text-[color:var(--text)]">
-              {user_name(p.user)} <span class="text-[color:var(--text-muted)]">({p.alignment})</span>
+              {user_name(p.user)}
+              <span class="text-[color:var(--text-muted)]">
+                ({faction_label(@game, p.alignment)})
+              </span>
             </span>
 
             <span class="flex flex-wrap gap-1">
@@ -1292,6 +1336,25 @@ defmodule MafiaWeb.MafiaRoomLive do
       status -> String.capitalize(status)
     end
   end
+
+  defp faction_options(ruleset, current) do
+    options = GameRules.faction_options(ruleset)
+    current = selected_faction(ruleset, current)
+
+    if current && Enum.all?(options, fn {_name, key} -> key != current end),
+      do: options ++ [{"Unlisted: #{current}", current}],
+      else: options
+  end
+
+  defp selected_faction(ruleset, current) do
+    case GameRules.faction(ruleset, current) do
+      nil -> if(current in [nil, ""], do: nil, else: to_string(current))
+      faction -> faction["key"]
+    end
+  end
+
+  defp faction_label(game, alignment),
+    do: GameRules.faction_name(game.ruleset, alignment) || "No faction"
 
   defp moderator_capabilities,
     do: ~w(post_public vote act private_chat react targetable candidate)

@@ -32,4 +32,16 @@ defmodule Mafia.AccountsTest do
     user = Fixtures.user_fixture()
     assert {:error, :invalid_login} = Accounts.authenticate(user.email, "wrong password")
   end
+
+  test "searches usernames by case-insensitive prefix" do
+    matches = ~w(connor connie conman cory coke)
+    Enum.each(matches, &Fixtures.user_fixture(%{username: &1}))
+    Fixtures.user_fixture(%{username: "scout"})
+
+    assert Accounts.search_users(" CO ")
+           |> Enum.map(& &1.username)
+           |> Enum.sort() == Enum.sort(matches)
+
+    assert Accounts.search_users("  ") == []
+  end
 end

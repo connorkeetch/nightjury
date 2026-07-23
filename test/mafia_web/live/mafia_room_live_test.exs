@@ -51,9 +51,18 @@ defmodule MafiaWeb.MafiaRoomLiveTest do
 
   test "host adds a player by name", %{conn: conn} do
     host = Fixtures.user_fixture()
-    invitee = Fixtures.user_fixture()
+    invitee = Fixtures.user_fixture(%{username: "connor"})
+    Fixtures.user_fixture(%{username: "connie"})
     {:ok, game} = Games.create_game(host.id, %{ruleset: %{"lobby_type" => "invite"}})
     {:ok, view, _html} = live(log_in_user(conn, host), ~p"/mafia/#{game.id}")
+
+    view
+    |> form(~s|form[phx-submit="add_player"]|, %{name: "co"})
+    |> render_change()
+
+    assert has_element?(view, "#player-name[list='player-user-suggestions']")
+    assert has_element?(view, "#player-user-suggestions option[value='connor']")
+    assert has_element?(view, "#player-user-suggestions option[value='connie']")
 
     view
     |> form(~s|form[phx-submit="add_player"]|, %{name: invitee.email})
@@ -65,6 +74,7 @@ defmodule MafiaWeb.MafiaRoomLiveTest do
   test "starting a game is separate from saving role edits", %{conn: conn} do
     context = game_in(:setup)
     {:ok, view, _html} = live(log_in_user(conn, context.host), ~p"/mafia/#{context.game.id}")
+    first_player_id = hd(context.players).player.id
 
     assert has_element?(
              view,
@@ -76,6 +86,19 @@ defmodule MafiaWeb.MafiaRoomLiveTest do
              view,
              "form[phx-submit='assign_roles'] button[type='button'][phx-click='start']"
            )
+
+    assert has_element?(
+             view,
+             "select[name='roles[#{first_player_id}][alignment]'] option[value='town']",
+             "Town"
+           )
+
+    assert has_element?(
+             view,
+             "input[name='roles[#{first_player_id}][role_name]'][list='common-role-presets']"
+           )
+
+    assert has_element?(view, "datalist#common-role-presets option[value='Doctor']")
   end
 
   defp game_in(status) do

@@ -11,6 +11,7 @@ defmodule MafiaWeb.GameWorkspaceLiveTest do
 
     {:ok, rules, rules_html} = live(conn, ~p"/mafia/#{game.id}/rules")
     assert rules_html =~ "Rulebook Test rules"
+    assert rules_html =~ "Mafia: Night phases only"
     assert has_element?(rules, "nav[aria-label='Game workspace']", "Overview")
 
     {:ok, settings, _html} =
@@ -25,6 +26,18 @@ defmodule MafiaWeb.GameWorkspaceLiveTest do
     |> render_click()
 
     assert has_element?(settings, "h3", "New ballot")
+
+    settings
+    |> element("button[phx-click='add_faction']")
+    |> render_click()
+
+    assert has_element?(settings, "input[value='New faction']")
+
+    assert has_element?(
+             settings,
+             "select[name='rules[factions][2][chat_policy]'] option[value='always']",
+             "Always open (24/7)"
+           )
   end
 
   test "player notebook is roster-backed and private to its owner", %{conn: conn} do

@@ -44,6 +44,34 @@ defmodule Mafia.ChatTest do
     assert {:error, :archived} = Chat.toggle_reaction(message.id, player.id, "👍")
   end
 
+  test "messages accept a direct HTTPS GIF and reject unsafe media" do
+    sender = Fixtures.user_fixture()
+    recipient = Fixtures.user_fixture()
+    {:ok, conversation} = Chat.create_group_conversation(sender.id, [recipient.id])
+
+    assert {:error, :invalid_gif} =
+             Chat.send_message(conversation.id, sender.id, "",
+               gif_url: "http://example.com/reaction.gif"
+             )
+
+    assert {:error, :invalid_gif} =
+             Chat.send_message(conversation.id, sender.id, "",
+               gif_url: "https://example.com/not-an-image.jpg"
+             )
+
+    assert {:ok, message} =
+             Chat.send_message(conversation.id, sender.id, "",
+               gif_url: "https://cdn.example.com/reaction.gif"
+             )
+
+    assert message.body == ""
+    assert message.json_metadata["format"] == "simple_markup_v1"
+
+    assert message.attachments == [
+             %{"type" => "gif", "url" => "https://cdn.example.com/reaction.gif"}
+           ]
+  end
+
   test "a locked day thread rejects player posts but permits moderator narration" do
     host = Fixtures.user_fixture()
     player = Fixtures.user_fixture()
@@ -82,7 +110,17 @@ defmodule Mafia.ChatTest do
     assert {:error, :not_found} = Chat.get_conversation_for_user(topic.id, outsider.id)
 
     assert {:ok, private_conversation} =
-             Chat.create_group_conversation(host.id, [player.id], title: "Private room")
+             Chat.start_direct_conversation(host.id, player.id)
+
+    assert {:ok, %{id: private_id}} = Chat.start_direct_conversation(host.id, player.id)
+    assert private_id == private_conversation.id
+
+    host_conversations = Chat.list_user_conversations(host.id)
+    player_conversations = Chat.list_user_conversations(player.id)
+
+    assert Enum.any?(host_conversations, &(&1.id == private_conversation.id))
+    assert Enum.any?(player_conversations, &(&1.id == private_conversation.id))
+    refute Enum.any?(host_conversations, &(&1.id == topic.id))
 
     assert {:ok, private_message} =
              Chat.send_message(private_conversation.id, host.id, "Members only")
@@ -95,6 +133,22 @@ defmodule Mafia.ChatTest do
 
     assert {:error, :not_found} =
              Chat.toggle_forum_reaction(private_message.id, outsider.id, "👍")
+  end
+
+  test "recent messages move a reused direct conversation to the top" do
+    sender = Fixtures.user_fixture()
+    first_recipient = Fixtures.user_fixture()
+    second_recipient = Fixtures.user_fixture()
+
+    assert {:ok, first} = Chat.start_direct_conversation(sender.id, first_recipient.id)
+    assert {:ok, second} = Chat.start_direct_conversation(sender.id, second_recipient.id)
+
+    assert MapSet.new(Chat.list_user_conversations(sender.id), & &1.id) ==
+             MapSet.new([first.id, second.id])
+
+    assert {:ok, _message} = Chat.send_message(first.id, sender.id, "Back to this one")
+    assert [%{id: first_id} | _] = Chat.list_user_conversations(sender.id)
+    assert first_id == first.id
   end
 
   test "forum replies and reactions join authenticated readers lazily" do
@@ -110,11 +164,18 @@ defmodule Mafia.ChatTest do
     assert {:error, :not_found} = Chat.get_conversation_for_user(topic.id, reader.id)
 
     assert {:ok, reply} =
-             Chat.reply_to_forum_topic(topic.id, reader.id, "The late vote switch mattered.")
+             Chat.reply_to_forum_topic(topic.id, reader.id, %{
+               "body" => "The late vote switch mattered.",
+               "gif_url" => "https://cdn.example.com/verdict.gif"
+             })
 
     assert {:ok, _conversation} = Chat.get_conversation_for_user(topic.id, reader.id)
     assert {:ok, [opening, loaded_reply]} = Chat.list_forum_messages(topic.id)
     assert loaded_reply.id == reply.id
+
+    assert loaded_reply.attachments == [
+             %{"type" => "gif", "url" => "https://cdn.example.com/verdict.gif"}
+           ]
 
     assert {:ok, reaction} = Chat.toggle_forum_reaction(opening.id, reader.id, "🤔")
     assert reaction.user_id == reader.id
@@ -124,7 +185,7 @@ defmodule Mafia.ChatTest do
              Chat.toggle_forum_reaction(opening.id, reader.id, "🦠")
   end
 
-  test "forum topics require a title and opening post" do
+  test "forum topics require a title and either text or a GIF" do
     host = Fixtures.user_fixture()
 
     assert {:error, :empty_title} =
@@ -132,6 +193,21 @@ defmodule Mafia.ChatTest do
 
     assert {:error, :empty_message} =
              Chat.create_forum_topic(host.id, %{title: "Valid title", body: "  "})
+
+    assert {:ok, gif_topic} =
+             Chat.create_forum_topic(host.id, %{
+               title: "Reaction only",
+               body: "",
+               gif_url: "https://cdn.example.com/reaction.gif"
+             })
+
+    assert {:ok, [%{body: "", attachments: [attachment]}]} =
+             Chat.list_forum_messages(gif_topic.id)
+
+    assert attachment == %{
+             "type" => "gif",
+             "url" => "https://cdn.example.com/reaction.gif"
+           }
 
     assert {:error, :title_too_long} =
              Chat.create_forum_topic(host.id, %{
