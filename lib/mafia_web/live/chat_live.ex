@@ -11,14 +11,27 @@ defmodule MafiaWeb.ChatLive do
      socket
      |> assign(:conversation_id, id)
      |> assign(:message, "")
+     |> assign(:gif_url, "")
      |> refresh()}
   end
 
   @impl true
-  def handle_event("send_message", %{"message" => %{"body" => body}}, socket) do
-    case Chat.send_message(socket.assigns.conversation_id, socket.assigns.current_user.id, body) do
-      {:ok, _message} -> {:noreply, socket |> assign(:message, "") |> refresh()}
-      {:error, reason} -> {:noreply, put_flash(socket, :error, chat_error(reason))}
+  def handle_event("send_message", %{"message" => attrs}, socket) do
+    body = Map.get(attrs, "body", "")
+    gif_url = Map.get(attrs, "gif_url", "")
+
+    case Chat.send_message(socket.assigns.conversation_id, socket.assigns.current_user.id, body,
+           gif_url: gif_url
+         ) do
+      {:ok, _message} ->
+        {:noreply, socket |> assign(:message, "") |> assign(:gif_url, "") |> refresh()}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(:message, body)
+         |> assign(:gif_url, gif_url)
+         |> put_flash(:error, chat_error(reason))}
     end
   end
 
@@ -79,57 +92,47 @@ defmodule MafiaWeb.ChatLive do
               {Calendar.strftime(message.created_at, "%b %-d, %H:%M")}
             </time>
           </div>
-          <p class={[
-            "mt-1 whitespace-pre-wrap leading-6",
-            (message.json_metadata || %{})["system"] &&
-              "italic text-[color:var(--text-muted)]"
-          ]}>
-            {message.body}
-          </p>
-          <div class="mt-2 flex flex-wrap gap-1">
-            <button
-              :for={emoji <- Chat.allowed_reactions()}
-              type="button"
-              phx-click="react"
-              phx-value-message-id={message.id}
-              phx-value-emoji={emoji}
-              class={[
-                "min-h-9 rounded-full border border-[color:var(--border)] px-2 text-xs",
-                reacted?(message, @current_user.id, emoji) && "bg-[color:var(--surface-2)]"
-              ]}
-              aria-label={"React with #{emoji}; #{reaction_count(message, emoji)} reactions"}
-              aria-pressed={reacted?(message, @current_user.id, emoji)}
-            >
-              {emoji} {reaction_count(message, emoji)}
-            </button>
-          </div>
+          <.message_body
+            message={message}
+            class={[
+              "mt-1",
+              (message.json_metadata || %{})["system"] &&
+                "italic text-[color:var(--text-muted)]"
+            ]}
+          />
+          <.message_reactions message={message} current_user={@current_user} />
         </article>
       </div>
 
       <.form
-        for={to_form(%{"body" => @message}, as: :message)}
+        for={to_form(%{"body" => @message, "gif_url" => @gif_url}, as: :message)}
         id="message-form"
         phx-submit="send_message"
-        class="flex items-end gap-2"
+        class="space-y-3"
       >
-        <div class="min-w-0 flex-1">
-          <.input
-            name="message[body]"
-            value={@message}
-            aria-label="Message"
-            placeholder={
-              if @conversation.is_read_only, do: "Thread is read-only", else: "Write a message…"
-            }
-            disabled={@conversation.is_read_only}
-          />
-        </div>
-        <.button
-          variant="primary"
+        <.rich_text_input
+          id="message-body"
+          name="message[body]"
+          value={@message}
+          label="Message"
+          rows={4}
+          maxlength="10000"
+          gif_name="message[gif_url]"
+          gif_value={@gif_url}
+          placeholder={
+            if @conversation.is_read_only, do: "Thread is read-only", else: "Write a message…"
+          }
           disabled={@conversation.is_read_only}
-          phx-disable-with="Sending…"
-        >
-          <.icon name="hero-paper-airplane" class="size-4" /> Send
-        </.button>
+        />
+        <div class="flex justify-end">
+          <.button
+            variant="primary"
+            disabled={@conversation.is_read_only}
+            phx-disable-with="Sending…"
+          >
+            <.icon name="hero-paper-airplane" class="size-4" /> Send
+          </.button>
+        </div>
       </.form>
     </section>
     """
@@ -153,13 +156,11 @@ defmodule MafiaWeb.ChatLive do
     end
   end
 
-  defp reacted?(message, user_id, emoji),
-    do: Enum.any?(message.reactions, &(&1.user_id == user_id and &1.emoji == emoji))
-
-  defp reaction_count(message, emoji), do: Enum.count(message.reactions, &(&1.emoji == emoji))
-
   defp chat_error(:muted), do: "You cannot post or react after elimination."
   defp chat_error(:read_only), do: "This conversation is read-only."
-  defp chat_error(:empty_message), do: "Write a message first."
+  defp chat_error(:empty_message), do: "Write a message or attach a GIF first."
+  defp chat_error(:message_too_long), do: "Keep messages under 10,000 characters."
+  defp chat_error(:invalid_gif), do: "Use a direct HTTPS URL ending in .gif."
+  defp chat_error(:rate_limited), do: "Slow down and try again in a moment."
   defp chat_error(_), do: "That chat action could not be completed."
 end

@@ -13,6 +13,30 @@ defmodule Mafia.GamesTest do
     assert Enum.any?(Notifications.list_for_user(host.id), &(&1.type == "mafia_phase"))
   end
 
+  test "a stale setup snapshot cannot provision a second set of faction rooms" do
+    host = Fixtures.user_fixture()
+    {:ok, setup} = Games.create_game(host.id, %{title: "Single start"})
+
+    assignments =
+      Enum.map(["mafia", "town", "town"], fn alignment ->
+        {:ok, player} = Games.join_game(setup, Fixtures.user_fixture().id)
+        %{player_id: player.id, alignment: alignment, role_name: alignment}
+      end)
+
+    :ok = Games.assign_roles(setup, host.id, assignments)
+    assert {:ok, _started} = Games.start_game(setup, host.id)
+
+    faction_room_count = fn ->
+      setup.id
+      |> Chat.list_game_conversations()
+      |> Enum.count(&(Map.get(&1.metadata || %{}, "channel") == "faction"))
+    end
+
+    assert faction_room_count.() == 1
+    assert {:error, :game_already_started} = Games.start_game(setup, host.id)
+    assert faction_room_count.() == 1
+  end
+
   test "a non-host cannot kick a setup player" do
     host = Fixtures.user_fixture()
     other = Fixtures.user_fixture()
@@ -317,6 +341,146 @@ defmodule Mafia.GamesTest do
              Chat.get_conversation_for_user(game.mafia_chat_conversation_id, mafia.user.id)
   end
 
+  test "a faction room configured as always open is available during the day" do
+    rules = put_faction_chat_policy(GameRules.default(), "mafia", "always")
+
+    %{game: game, host: host, players: [mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town], rules)
+
+    assert {:ok, _conversation} =
+             Chat.get_conversation_for_user(game.mafia_chat_conversation_id, mafia.user.id)
+
+    renamed =
+      update_in(game.ruleset, ["factions"], fn factions ->
+        Enum.map(factions, fn
+          %{"key" => "mafia"} = faction -> Map.put(faction, "name", "The Family")
+          faction -> faction
+        end)
+      end)
+
+    {:ok, _updated} = Games.update_rules(game, host.id, renamed, "Rename Mafia")
+
+    assert {:ok, %{title: "Test Game — The Family"}} =
+             Chat.get_conversation_for_user(game.mafia_chat_conversation_id, mafia.user.id)
+  end
+
+  test "faction reassignment immediately denies the previous private room" do
+    %{game: game, host: host, players: [mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    {:ok, night} = Games.resolve_day(game)
+
+    assert {:ok, _conversation} =
+             Chat.get_conversation_for_user(night.mafia_chat_conversation_id, mafia.user.id)
+
+    assert {:ok, _updated} =
+             Games.moderate_player(night, mafia.player.id, host.id, %{alignment: "town"})
+
+    assert {:error, :not_found} =
+             Chat.get_conversation_for_user(night.mafia_chat_conversation_id, mafia.user.id)
+  end
+
+  test "re-enabled Mafia chat refreshes the classic room shortcut" do
+    %{game: game, host: host, players: [mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    original_id = game.mafia_chat_conversation_id
+    disabled = put_faction_chat_policy(game.ruleset, "mafia", "disabled")
+    {:ok, disabled_game} = Games.update_rules(game, host.id, disabled, "Close Mafia chat")
+
+    enabled = put_faction_chat_policy(disabled_game.ruleset, "mafia", "always")
+    {:ok, enabled_game} = Games.update_rules(disabled_game, host.id, enabled, "Open Mafia chat")
+    refreshed = Games.get_game!(game.id)
+
+    assert enabled_game.mafia_chat_conversation_id == refreshed.mafia_chat_conversation_id
+    assert refreshed.mafia_chat_conversation_id != original_id
+
+    assert {:ok, _conversation} =
+             Chat.get_conversation_for_user(refreshed.mafia_chat_conversation_id, mafia.user.id)
+  end
+
+  test "existing Mafia room repairs a missing classic room shortcut" do
+    %{game: game, host: host, players: [_mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    original_id = game.mafia_chat_conversation_id
+
+    cleared =
+      game
+      |> Ash.Changeset.for_update(:update, %{mafia_chat_conversation_id: nil})
+      |> Ash.update!(authorize?: false)
+
+    changed = Map.put(cleared.ruleset, "description", "Repair room pointer")
+    assert {:ok, repaired} = Games.update_rules(cleared, host.id, changed, "Repair pointer")
+    assert repaired.mafia_chat_conversation_id == original_id
+  end
+
+  test "deferred Mafia room creation returns the repaired shortcut on phase change" do
+    %{game: game, host: host, players: [mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    original_id = game.mafia_chat_conversation_id
+    disabled = put_faction_chat_policy(game.ruleset, "mafia", "disabled")
+    {:ok, disabled_game} = Games.update_rules(game, host.id, disabled, "Disable Mafia room")
+
+    night_only = put_faction_chat_policy(disabled_game.ruleset, "mafia", "night")
+    {:ok, waiting_game} = Games.update_rules(disabled_game, host.id, night_only, "Night only")
+    {:ok, night} = Games.resolve_day(waiting_game)
+
+    assert night.mafia_chat_conversation_id != original_id
+
+    assert {:ok, _conversation} =
+             Chat.get_conversation_for_user(night.mafia_chat_conversation_id, mafia.user.id)
+  end
+
+  test "classic mode rejects custom-faction mutations after play begins" do
+    moderator_rules = Map.put(GameRules.default(), "win_mode", "moderator")
+
+    %{game: game, host: host, players: [_mafia, town1, _town2]} =
+      started_game([:mafia, :town, :town], moderator_rules)
+
+    assert {:ok, _custom} =
+             Games.moderate_player(game, town1.player.id, host.id, %{alignment: "cult"})
+
+    classic_rules = Map.put(game.ruleset, "win_mode", "classic")
+
+    assert {:error, :classic_requires_town_and_mafia} =
+             Games.update_rules(game, host.id, classic_rules, "Use automatic victory")
+
+    assert Games.get_game!(game.id).ruleset["win_mode"] == "moderator"
+  end
+
+  test "classic mode rejects moving an active player to a custom faction" do
+    %{game: game, host: host, players: [_mafia, town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    assert {:error, :classic_requires_town_and_mafia} =
+             Games.moderate_player(game, town1.player.id, host.id, %{alignment: "cult"})
+  end
+
+  test "classic-compatible faction changes immediately resolve victory" do
+    %{game: game, host: host, players: [mafia, _town1, _town2]} =
+      started_game([:mafia, :town, :town])
+
+    assert {:ok, _updated} =
+             Games.moderate_player(game, mafia.player.id, host.id, %{alignment: "town"})
+
+    finished = Games.get_game!(game.id)
+    assert finished.status == :finished
+    assert finished.winner_faction == "town"
+  end
+
+  test "switching to classic victory immediately resolves an existing terminal roster" do
+    rules = Map.put(GameRules.default(), "win_mode", "moderator")
+
+    %{game: game, host: host} = started_game([:mafia, :mafia, :town], rules)
+    classic = Map.put(game.ruleset, "win_mode", "classic")
+
+    assert {:ok, finished} = Games.update_rules(game, host.id, classic, "Automate victory")
+    assert finished.status == :finished
+    assert finished.winner_faction == "mafia"
+  end
+
   test "moderator inclusion is reconciled for existing private rooms" do
     rules = Map.put(GameRules.default(), "private_chat_include_moderator", false)
 
@@ -370,7 +534,15 @@ defmodule Mafia.GamesTest do
   end
 
   test "moderator win mode supports free-form factions and explicit winners" do
-    rules = GameRules.default() |> Map.put("win_mode", "moderator")
+    factions =
+      for name <- ~w(Red Blue Green) do
+        %{"key" => String.downcase(name), "name" => name, "chat_policy" => "disabled"}
+      end
+
+    rules =
+      GameRules.default()
+      |> Map.put("win_mode", "moderator")
+      |> Map.put("factions", factions)
 
     %{game: game, host: host, players: [_red, blue, _green]} =
       started_game(["Red", "Blue", "Green"], rules)
@@ -381,6 +553,36 @@ defmodule Mafia.GamesTest do
     assert {:ok, finished} = Games.declare_winner(Games.get_game!(game.id), "Red", host.id)
     assert finished.status == :finished
     assert finished.winner_faction == "Red"
+  end
+
+  test "saving legacy rules preserves seated free-form factions" do
+    host = Fixtures.user_fixture()
+    {:ok, game} = Games.create_game(host.id, %{title: "Legacy game"})
+
+    legacy_game =
+      game
+      |> Ash.Changeset.for_update(:update, %{
+        ruleset: %{
+          "schema_version" => 2,
+          "win_mode" => "moderator",
+          "private_factions" => ["mafia"]
+        }
+      })
+      |> Ash.update!(authorize?: false)
+
+    players =
+      Enum.map(["mafia", "town", "Wanderers"], fn alignment ->
+        {:ok, player} = Games.join_game(legacy_game, Fixtures.user_fixture().id)
+        %{player_id: player.id, role_name: alignment, alignment: alignment}
+      end)
+
+    :ok = Games.assign_roles(legacy_game, host.id, players)
+    changed = Map.put(GameRules.normalize(legacy_game.ruleset), "description", "Updated")
+
+    assert {:ok, updated} = Games.update_rules(legacy_game, host.id, changed, "Update notes")
+    assert updated.ruleset["_legacy_unconfigured_alignments"]
+    assert GameRules.faction(updated.ruleset, "wanderers") == nil
+    assert {:ok, _started} = Games.start_game(updated, host.id)
   end
 
   test "a private notebook lazily stores general and per-player notes" do
@@ -403,6 +605,15 @@ defmodule Mafia.GamesTest do
 
     assert {:error, :not_a_player} =
              Games.save_notebook(game, outsider.id, %{"general" => "No access"})
+  end
+
+  defp put_faction_chat_policy(rules, key, policy) do
+    update_in(rules, ["factions"], fn factions ->
+      Enum.map(factions, fn
+        %{"key" => ^key} = faction -> Map.put(faction, "chat_policy", policy)
+        faction -> faction
+      end)
+    end)
   end
 
   defp started_game(alignments, ruleset \\ nil) do

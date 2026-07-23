@@ -11,6 +11,31 @@ defmodule Mafia.GameRules do
   @phases ~w(day night)
   @methods ~w(majority plurality moderator)
   @visibilities ~w(live totals secret)
+  @chat_policies ~w(disabled day night always)
+
+  @common_roles [
+    "Vanilla Townie",
+    "Mafia Goon",
+    "Doctor",
+    "Investigator",
+    "Shooter",
+    "Roleblocker",
+    "Tracker",
+    "Watcher",
+    "Bodyguard",
+    "Jailkeeper",
+    "Mason",
+    "Neighbor",
+    "Miller",
+    "Godfather",
+    "Serial Killer",
+    "Survivor"
+  ]
+
+  @default_factions [
+    %{"key" => "town", "name" => "Town", "chat_policy" => "disabled"},
+    %{"key" => "mafia", "name" => "Mafia", "chat_policy" => "night"}
+  ]
 
   @default_status_capabilities %{
     "active" => @capabilities,
@@ -37,7 +62,8 @@ defmodule Mafia.GameRules do
   }
 
   @defaults %{
-    "schema_version" => 2,
+    "schema_version" => 3,
+    "_legacy_unconfigured_alignments" => false,
     "description" => "",
     "house_rules" => "",
     "lobby_type" => "open",
@@ -49,6 +75,7 @@ defmodule Mafia.GameRules do
     "day_thread_open_at_night" => false,
     "reveal_on_death" => "full",
     "win_mode" => "classic",
+    "factions" => @default_factions,
     "private_factions" => ["mafia"],
     "private_chat_policy" => "night",
     "night_conversation_cap" => 3,
@@ -61,6 +88,7 @@ defmodule Mafia.GameRules do
   def default, do: @defaults
   def statuses, do: @statuses
   def capabilities, do: @capabilities
+  def common_roles, do: @common_roles
   def new_ballot, do: Map.put(@default_ballot, "key", "ballot")
 
   def normalize(nil), do: @defaults
@@ -68,9 +96,21 @@ defmodule Mafia.GameRules do
   def normalize(ruleset) when is_map(ruleset) do
     source = stringify_keys(ruleset)
     merged = Map.merge(@defaults, source)
+    win_mode = one_of(merged["win_mode"], ~w(classic moderator), "classic")
+
+    legacy_unconfigured_alignments =
+      if Map.has_key?(source, "_legacy_unconfigured_alignments"),
+        do: boolean(source["_legacy_unconfigured_alignments"], false),
+        else: legacy_rules?(source)
+
+    factions =
+      source
+      |> normalize_factions(merged)
+      |> ensure_classic_factions(win_mode)
 
     merged
-    |> Map.put("schema_version", 2)
+    |> Map.put("schema_version", 3)
+    |> Map.put("_legacy_unconfigured_alignments", legacy_unconfigured_alignments)
     |> Map.put("description", text(merged["description"], 10_000))
     |> Map.put("house_rules", text(merged["house_rules"], 20_000))
     |> Map.put("lobby_type", one_of(merged["lobby_type"], ~w(open invite), "open"))
@@ -93,8 +133,12 @@ defmodule Mafia.GameRules do
       "reveal_on_death",
       one_of(merged["reveal_on_death"], ~w(full alignment none), "full")
     )
-    |> Map.put("win_mode", one_of(merged["win_mode"], ~w(classic moderator), "classic"))
-    |> Map.put("private_factions", labels(merged["private_factions"]))
+    |> Map.put("win_mode", win_mode)
+    |> Map.put("factions", factions)
+    |> Map.put(
+      "private_factions",
+      for(faction <- factions, faction["chat_policy"] != "disabled", do: faction["key"])
+    )
     |> Map.put(
       "private_chat_policy",
       one_of(merged["private_chat_policy"], ~w(disabled day night always), "night")
@@ -137,7 +181,7 @@ defmodule Mafia.GameRules do
       "day_thread_open_at_night" => Map.get(params, "day_thread_open_at_night", false),
       "reveal_on_death" => Map.get(params, "reveal_on_death", current["reveal_on_death"]),
       "win_mode" => Map.get(params, "win_mode", current["win_mode"]),
-      "private_factions" => Map.get(params, "private_factions", current["private_factions"]),
+      "factions" => form_factions(Map.get(params, "factions", current["factions"])),
       "private_chat_policy" =>
         Map.get(params, "private_chat_policy", current["private_chat_policy"]),
       "night_conversation_cap" =>
@@ -167,6 +211,38 @@ defmodule Mafia.GameRules do
 
   def ballot(ruleset, key) do
     Enum.find(ballots(ruleset), &(&1["key"] == to_string(key)))
+  end
+
+  def factions(ruleset), do: normalize(ruleset)["factions"]
+
+  def canonical_faction_key(value), do: value |> text(100) |> String.downcase()
+
+  def faction(ruleset, key) do
+    key = canonical_faction_key(key)
+    Enum.find(factions(ruleset), &(canonical_faction_key(&1["key"]) == key))
+  end
+
+  def faction_name(_ruleset, nil), do: nil
+
+  def faction_name(ruleset, key) do
+    case faction(ruleset, key) do
+      nil -> text(key, 100)
+      faction -> faction["name"]
+    end
+  end
+
+  def faction_options(ruleset) do
+    factions = factions(ruleset)
+    name_counts = Enum.frequencies_by(factions, &String.downcase(&1["name"]))
+
+    Enum.map(factions, fn faction ->
+      label =
+        if name_counts[String.downcase(faction["name"])] > 1,
+          do: "#{faction["name"]} (#{faction["key"]})",
+          else: faction["name"]
+
+      {label, faction["key"]}
+    end)
   end
 
   def capability?(ruleset, player, capability) do
@@ -201,6 +277,14 @@ defmodule Mafia.GameRules do
     case normalize(ruleset)["private_chat_policy"] do
       "always" -> true
       policy -> policy == to_string(phase)
+    end
+  end
+
+  def faction_chat_allowed?(ruleset, faction_key, phase) do
+    case faction(ruleset, faction_key) do
+      %{"chat_policy" => "always"} -> true
+      %{"chat_policy" => policy} -> policy == to_string(phase)
+      nil -> false
     end
   end
 
@@ -327,6 +411,78 @@ defmodule Mafia.GameRules do
 
   defp form_ballots(_), do: []
 
+  defp normalize_factions(source, merged) do
+    raw =
+      cond do
+        is_list(source["factions"]) -> source["factions"]
+        Map.has_key?(source, "factions") -> []
+        legacy_rules?(source) -> legacy_factions(source, merged)
+        true -> merged["factions"]
+      end
+
+    factions =
+      raw
+      |> List.wrap()
+      |> Enum.with_index()
+      |> Enum.map(fn {faction, index} -> normalize_faction(faction, index) end)
+      |> Enum.uniq_by(& &1["key"])
+
+    if factions == [], do: @default_factions, else: factions
+  end
+
+  defp normalize_faction(faction, index) do
+    faction = if is_map(faction), do: stringify_keys(faction), else: %{}
+    fallback_name = "Faction #{index + 1}"
+    name = nonempty_text(faction["name"], fallback_name, 80)
+    key = canonical_faction_key(faction["key"])
+
+    %{
+      "key" => if(key == "", do: slug(name, "faction-#{index + 1}"), else: key),
+      "name" => name,
+      "chat_policy" => one_of(faction["chat_policy"], @chat_policies, "disabled")
+    }
+  end
+
+  defp ensure_classic_factions(factions, "classic") do
+    required =
+      Enum.map(@default_factions, fn default ->
+        Enum.find(factions, &(&1["key"] == default["key"])) || default
+      end)
+
+    extras = Enum.reject(factions, &(&1["key"] in ["town", "mafia"]))
+    required ++ extras
+  end
+
+  defp ensure_classic_factions(factions, _win_mode), do: factions
+
+  defp legacy_factions(source, merged) do
+    private = labels(Map.get(source, "private_factions", merged["private_factions"]))
+    fallback_policy = one_of(merged["private_chat_policy"], @chat_policies, "night")
+    policy = one_of(source["private_chat_policy"], @chat_policies, fallback_policy)
+    defaults = Enum.map(@default_factions, &Map.put(&1, "chat_policy", "disabled"))
+
+    (defaults ++
+       Enum.map(private, &%{"key" => &1, "name" => titleize(&1), "chat_policy" => policy}))
+    |> Enum.map(fn faction ->
+      if faction["key"] in private, do: Map.put(faction, "chat_policy", policy), else: faction
+    end)
+    |> Enum.uniq_by(& &1["key"])
+  end
+
+  defp legacy_rules?(source) do
+    Map.has_key?(source, "private_factions") or source["schema_version"] in [1, 2, "1", "2"]
+  end
+
+  defp form_factions(raw) when is_list(raw), do: raw
+
+  defp form_factions(raw) when is_map(raw) do
+    raw
+    |> Enum.sort_by(fn {key, _value} -> integer(key, 0, 0, 1_000) end)
+    |> Enum.map(fn {_key, value} -> value end)
+  end
+
+  defp form_factions(_), do: []
+
   defp hours_to_seconds(nil, fallback), do: fallback
 
   defp hours_to_seconds(value, fallback) do
@@ -353,10 +509,17 @@ defmodule Mafia.GameRules do
     |> Enum.map(&(&1 |> safe_string() |> String.trim() |> String.downcase()))
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()
-    |> Enum.take(20)
   end
 
   defp labels(_value), do: []
+
+  defp titleize(value) do
+    value
+    |> safe_string()
+    |> String.replace(~r/[-_]+/u, " ")
+    |> String.split()
+    |> Enum.map_join(" ", &String.capitalize/1)
+  end
 
   defp slug(value, fallback) do
     slug =

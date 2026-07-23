@@ -4,6 +4,8 @@ defmodule MafiaWeb.GameSettingsLive do
   alias Mafia.{GameRules, Games}
   import MafiaWeb.GameComponents
 
+  @max_additional_factions 20
+
   @impl true
   def mount(%{"id" => id}, _session, socket) do
     case Games.get_game_for_view(id) do
@@ -18,6 +20,7 @@ defmodule MafiaWeb.GameSettingsLive do
          |> assign(:draft_rules, rules)
          |> assign(:change_summary, "")
          |> assign(:statuses, GameRules.statuses())
+         |> assign(:max_additional_factions, @max_additional_factions)
          |> assign(:capabilities, GameRules.capabilities())}
 
       {:ok, game} ->
@@ -60,6 +63,36 @@ defmodule MafiaWeb.GameSettingsLive do
           socket.assigns.draft_rules,
           "ballots",
           List.delete_at(ballots, parse_index(index))
+        )
+      else
+        socket.assigns.draft_rules
+      end
+
+    {:noreply, assign(socket, :draft_rules, rules)}
+  end
+
+  def handle_event("add_faction", _params, socket) do
+    rules = socket.assigns.draft_rules
+
+    rules =
+      if additional_faction_count(rules) < @max_additional_factions do
+        Map.update!(rules, "factions", &(&1 ++ [blank_faction()]))
+      else
+        rules
+      end
+
+    {:noreply, assign(socket, :draft_rules, rules)}
+  end
+
+  def handle_event("remove_faction", %{"index" => index}, socket) do
+    factions = GameRules.factions(socket.assigns.draft_rules)
+
+    rules =
+      if length(factions) > 1 do
+        Map.put(
+          socket.assigns.draft_rules,
+          "factions",
+          List.delete_at(factions, parse_index(index))
         )
       else
         socket.assigns.draft_rules
@@ -425,34 +458,80 @@ defmodule MafiaWeb.GameSettingsLive do
 
         <details class="panel" open>
           <summary class="cursor-pointer text-lg font-semibold text-[color:var(--text)]">
-            Private conversations
+            Factions and private conversations
           </summary>
           <p class="mt-2 text-sm leading-6 text-[color:var(--text-muted)]">
-            These limits apply consistently to faction rooms and player-created private groups.
+            Define the factions first. They become the choices when assigning players, and each
+            faction can have its own private-room schedule.
           </p>
-          <div class="mt-5 grid gap-4 sm:grid-cols-2">
-            <.input
-              name="rules[private_factions]"
-              label="Private faction rooms"
-              value={Enum.join(@draft_rules["private_factions"], ", ")}
-              placeholder="mafia, infected, pale horse"
-            />
+
+          <div class="mt-5 space-y-3">
+            <fieldset
+              :for={{faction, index} <- Enum.with_index(@draft_rules["factions"])}
+              class="surface-card grid gap-3 p-4 sm:grid-cols-[1fr_13rem_auto] sm:items-end"
+            >
+              <legend class="sr-only">Faction {index + 1}</legend>
+              <input
+                type="hidden"
+                name={"rules[factions][#{index}][key]"}
+                value={faction["key"]}
+              />
+              <.input
+                name={"rules[factions][#{index}][name]"}
+                label="Faction name"
+                value={faction["name"]}
+                maxlength="80"
+                required
+              />
+              <.input
+                type="select"
+                name={"rules[factions][#{index}][chat_policy]"}
+                label="Private faction room"
+                value={faction["chat_policy"]}
+                options={chat_policy_options()}
+              />
+              <button
+                type="button"
+                phx-click="remove_faction"
+                phx-value-index={index}
+                disabled={
+                  length(@draft_rules["factions"]) == 1 or
+                    (@draft_rules["win_mode"] == "classic" and faction["key"] in ["town", "mafia"])
+                }
+                class="btn btn-quiet min-h-11 text-xs"
+                aria-label={"Remove #{faction["name"]} faction"}
+              >
+                <.icon name="hero-trash" class="size-4" /> Remove
+              </button>
+            </fieldset>
+
+            <button
+              type="button"
+              phx-click="add_faction"
+              disabled={additional_faction_count(@draft_rules) >= @max_additional_factions}
+              class="btn btn-secondary text-sm"
+            >
+              <.icon name="hero-plus" class="size-4" /> Add faction
+            </button>
+
+            <p class="text-xs leading-5 text-[color:var(--text-muted)]">
+              Classic victory always keeps Town and Mafia available. Use moderator-declared victory
+              for custom faction structures. Up to 20 additional factions may be configured.
+            </p>
+          </div>
+
+          <div class="mt-6 grid gap-4 border-t border-[color:var(--border)] pt-5 sm:grid-cols-2">
             <.input
               type="select"
               name="rules[private_chat_policy]"
-              label="Private chats are available"
+              label="Player-created private chats"
               value={@draft_rules["private_chat_policy"]}
-              options={[
-                {"Never", "disabled"},
-                {"During the day", "day"},
-                {"During the night", "night"},
-                {"At all times", "always"}
-              ]}
+              options={chat_policy_options()}
             />
             <.input
               type="number"
               name="rules[night_conversation_cap]"
-              label="Private chats per player"
+              label="Player-created chats per player"
               value={@draft_rules["night_conversation_cap"]}
               min="0"
               max="20"
@@ -592,6 +671,20 @@ defmodule MafiaWeb.GameSettingsLive do
     }
   end
 
+  defp blank_faction do
+    %{
+      "key" => "faction-#{Ecto.UUID.generate()}",
+      "name" => "New faction",
+      "chat_policy" => "disabled"
+    }
+  end
+
+  defp additional_faction_count(rules) do
+    rules
+    |> GameRules.factions()
+    |> Enum.count(&(&1["key"] not in ["town", "mafia"]))
+  end
+
   defp parse_index(index) do
     case Integer.parse(to_string(index)) do
       {value, ""} -> value
@@ -607,6 +700,15 @@ defmodule MafiaWeb.GameSettingsLive do
       "" -> GameRules.summary(rules)
       text -> String.slice(text, 0, 240)
     end
+  end
+
+  defp chat_policy_options do
+    [
+      {"No private room", "disabled"},
+      {"Day only", "day"},
+      {"Night only", "night"},
+      {"Always open (24/7)", "always"}
+    ]
   end
 
   defp ballot_effect_options(rules, index, ballot) do

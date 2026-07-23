@@ -29,6 +29,25 @@ defmodule Mafia.Accounts do
 
   def get_user_by_username(_), do: nil
 
+  def search_users(query) when is_binary(query) do
+    query = query |> String.trim() |> String.downcase()
+
+    if query == "" do
+      []
+    else
+      User
+      |> Ash.Query.filter(
+        string_starts_with(string_downcase(username), ^query) and is_nil(deleted_at)
+      )
+      |> Ash.Query.sort(username: :asc)
+      |> Ash.Query.limit(10)
+      |> Ash.read!(authorize?: false)
+      |> Enum.reject(&blocked?(&1.id))
+    end
+  end
+
+  def search_users(_), do: []
+
   def get_user_by_username_or_email(identifier) when is_binary(identifier) do
     identifier = String.downcase(String.trim(identifier))
 
