@@ -102,7 +102,7 @@ The [extraction runbook](docs/operations/extraction-runbook.md) documents the or
 | UI assets are missing? | Run `mix assets.setup` and `mix assets.build`; dependency and asset downloads require network access. |
 | Is every idea in the planning document implemented? | No. Planning documents record design intent; use the routes, code, and tests to establish current behavior. |
 | Where can I ask a question or report a bug? | Search [issues](https://github.com/connorkeetch/nightjury/issues) first. Include OS, toolchain versions, reproduction steps, and redacted logs. Replies and PR review are not guaranteed. Never post passwords, session tokens, or private player messages. |
-| What license applies? | No root `LICENSE` file is included in this snapshot. Licensing is not being changed by this documentation update; ask the owner to clarify reuse terms. |
+| What license applies? | Project source code is available under the [MIT License](LICENSE). Third-party dependencies, assets, and services retain their own terms. |
 
 ## Code and documentation map
 
